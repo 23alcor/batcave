@@ -1,0 +1,14 @@
+node_modules/
+.wrangler/
+.DS_Store
+
+# Your own config and secrets (copied from the *.example files by `npm run setup`)
+wrangler.jsonc
+wrangler.dry-run.jsonc
+.dev.vars
+.env
+.site-password
+scripts/notion.config.json
+
+# Personal data exports (Notion import, database snapshots)
+seed/

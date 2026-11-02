@@ -1,0 +1,38 @@
+// Cloudflare config. `npm run setup` copies this to wrangler.jsonc and fills it in for you.
+// wrangler.jsonc is git-ignored, so your database id, domain and personal settings stay out of the repo.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "batcave",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "batcave",
+      "database_id": "YOUR_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Optional: serve it on your own domain (the domain has to be on your Cloudflare account).
+  // Without this it lives at https://batcave.<your-subdomain>.workers.dev
+  // "routes": [{ "pattern": "cave.example.com", "custom_domain": true }],
+  "observability": { "enabled": true },
+  // Your settings. Change them any time and run `npm run deploy`.
+  "vars": {
+    "APP_NAME": "Batcave",              // sidebar, page titles, login page, home-screen icon
+    "OWNER_NAME": "",                   // your first name: "Good evening, <name>"
+    "OWNER_FULL_NAME": "",              // shown on the public /privacy page (Google asks for one)
+    "ASSISTANT_NAME": "Alfred",         // the chat assistant ("Ask Alfred"); it talks like a polite butler
+    "HONORIFIC": "sir",                 // how the assistant addresses you: sir, ma'am, boss, your name…
+    "TIMEZONE": "America/New_York",     // IANA time zone, e.g. Europe/London, Asia/Manila
+    "TAGLINE": "",                      // optional line under the sidebar's assistant button
+    "CONTACT_EMAIL": ""                 // optional, shown on /privacy
+    // "OPENAI_MODEL": "gpt-6.1-terra", // assistant model (default)
+    // "OPENAI_REASONING": "low"        // none | low | medium | high, or off
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "batcave",
+  "version": "1.0.0",
+  "description": "A personal command center on Cloudflare Workers: tasks, calendar with Google sync, daily and weekly habits, and a chat assistant that can change things for you.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "set-password": "node scripts/set-password.mjs",
+    "db:migrate": "wrangler d1 migrations apply batcave --remote",
+    "db:migrate:local": "wrangler d1 migrations apply batcave --local",
+    "db:examples": "wrangler d1 execute batcave --remote --file examples/starter.sql",
+    "db:examples:local": "wrangler d1 execute batcave --local --file examples/starter.sql",
+    "import:notion": "node scripts/import-notion.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "wrangler": "^4.150.0"
+  }
+}

@@ -1,0 +1,563 @@
+// Batcave — Cloudflare Worker: password-protected JSON API + static Ops Console UI.
+// Personal settings (name, time zone, assistant name…) come from wrangler.jsonc vars via src/config.js.
+import { expandEvents, parseICS } from './calendar.js';
+import { chat, processTodo } from './chat.js';
+import { cfg, loadConfig, publicConfig } from './config.js';
+import { GoogleError, callback as googleCallback, cancelEvent, connect as googleConnect, createEvent, disconnect as googleDisconnect, getEvent, googleEvents, googleState, listCalendars, restoreEvent, setCalendarShown, syncCalendars, updateEvent } from './google.js';
+import { authConfigured, checkPassword, clearFailures, clearSessionCookie, hasSession, lockedOut, loginPage, makeSessionCookie, recordFailure, safeNext } from './auth.js';
+
+
+// ---------- helpers ----------
+const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+const bad = (msg, status = 400) => json({ error: msg }, status);
+const plain = (text, status = 200) => new Response(text, { status, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } });
+const newId = () => crypto.randomUUID().replace(/-/g, '');
+
+// Wall-clock date and time in the owner's time zone (TIMEZONE).
+export function localNow(d = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: cfg.tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d);
+  const g = (t) => parts.find((p) => p.type === t).value;
+  const hh = g('hour') === '24' ? '00' : g('hour');
+  return { date: `${g('year')}-${g('month')}-${g('day')}`, time: `${hh}:${g('minute')}` };
+}
+export const addDays = (day, n) => { const d = new Date(day + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+const isDue = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(s);
+const str = (v, max = 500) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+
+async function body(req) {
+  try { return await req.json(); } catch { return {}; }
+}
+
+// ---------- ingest token (Pi webhook server) ----------
+async function verifyIngest(req, env) {
+  const t = env.INGEST_TOKEN;
+  const got = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!t || !got || t.length !== got.length) return false;
+  let diff = 0;
+  for (let i = 0; i < t.length; i++) diff |= t.charCodeAt(i) ^ got.charCodeAt(i);
+  return diff === 0;
+}
+
+// ---------- wake-up times ----------
+// Kept in meta as wake:default, wake:dow:<0-6, Sunday = 0> and wake:<YYYY-MM-DD>.
+// A day uses its own time, else its weekday's, else the default.
+const WAKE_FALLBACK = '07:00';
+const isHHMM = (s) => typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
+const dowOf = (day) => new Date(day + 'T12:00:00Z').getUTCDay();
+async function wakeConfig(env) {
+  const { results } = await env.DB.prepare("SELECT key, value FROM meta WHERE key LIKE 'wake:%'").all();
+  const cfg = { default: WAKE_FALLBACK, weekdays: {}, days: {} };
+  for (const r of results) {
+    const k = r.key.slice(5);
+    if (!isHHMM(r.value)) continue;
+    if (k === 'default') cfg.default = r.value;
+    else if (/^dow:[0-6]$/.test(k)) cfg.weekdays[k.slice(4)] = r.value;
+    else if (isDay(k)) cfg.days[k] = r.value;
+  }
+  return cfg;
+}
+export function wakeFor(cfg, day) {
+  if (cfg.days[day]) return { time: cfg.days[day], from: 'day' };
+  const w = cfg.weekdays[dowOf(day)];
+  return w ? { time: w, from: 'weekday' } : { time: cfg.default, from: 'default' };
+}
+// changes: [{ key: 'default' | 'dow:0'..'dow:6' | 'YYYY-MM-DD', time: 'HH:MM' or null to remove }]
+async function setWake(env, changes) {
+  if (!Array.isArray(changes) || !changes.length || changes.length > 20) return bad('send {"changes": [{"key", "time"}]}');
+  const stmts = [];
+  for (const c of changes) {
+    const key = String(c?.key || '');
+    if (!(key === 'default' || /^dow:[0-6]$/.test(key) || isDay(key))) return bad(`unknown wake key "${key}"`);
+    if (c.time == null || c.time === '') {
+      if (key === 'default') return bad('the default wake-up time can be changed but not removed');
+      stmts.push(env.DB.prepare('DELETE FROM meta WHERE key = ?1').bind('wake:' + key));
+    } else if (isHHMM(c.time)) {
+      stmts.push(env.DB.prepare('INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind('wake:' + key, c.time));
+    } else return bad('time must be HH:MM');
+  }
+  // One-day times are forgotten two weeks after the day.
+  stmts.push(env.DB.prepare("DELETE FROM meta WHERE key GLOB 'wake:[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND substr(key, 6) < ?1").bind(addDays(localNow().date, -14)));
+  await env.DB.batch(stmts);
+  return json(await wakeConfig(env));
+}
+
+// ---------- task classification ----------
+function bucket(t, today) {
+  if (t.date_tbd) return 'tbd';
+  if (!t.due_at) return 'nodate';
+  const day = t.due_at.slice(0, 10);
+  if (day < today) return 'overdue';
+  if (day === today) return 'today';
+  if (day <= addDays(today, 7)) return 'soon';
+  return 'later';
+}
+const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 864e5);
+
+async function openTasks(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT t.id, t.title, t.project_id, t.kind, t.due_at, t.date_tbd, t.url, t.notes, p.short_name AS project, p.color AS project_color
+     FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
+     WHERE t.status = 'open' ORDER BY t.due_at IS NULL, t.due_at`
+  ).all();
+  return results;
+}
+
+// ---------- API: dashboard ----------
+async function dashboard(env) {
+  const now = localNow();
+  const today = now.date;
+  const yesterday = addDays(today, -1);
+  const all = await openTasks(env);
+  const tasks = all.filter((t) => t.kind === 'task');
+  const inbox = all.filter((t) => t.kind === 'inbox');
+  const k = { overdue: 0, today: 0, soon: 0, later: 0, tbd: 0, nodate: 0 };
+  for (const t of tasks) { t.bucket = bucket(t, today); k[t.bucket]++; }
+  const overdueYesterday = tasks.filter((t) => t.due_at && !t.date_tbd && t.due_at.slice(0, 10) < yesterday).length;
+  const overdue = tasks.filter((t) => t.bucket === 'overdue').sort((a, b) => a.due_at.localeCompare(b.due_at));
+  const soon = tasks.filter((t) => t.bucket === 'soon').sort((a, b) => a.due_at.localeCompare(b.due_at));
+  const dueToday = tasks.filter((t) => t.bucket === 'today');
+  const focus = [...dueToday, ...overdue.slice().reverse(), ...soon].slice(0, 3).map((t) => ({ ...t, days: t.due_at ? daysBetween(today, t.due_at.slice(0, 10)) : null }));
+
+  const { results: projects } = await env.DB.prepare('SELECT id, name, short_name, status, color, sort FROM projects WHERE archived = 0 ORDER BY sort').all();
+  for (const p of projects) {
+    const mine = tasks.filter((t) => t.project_id === p.id);
+    p.open = mine.length;
+    p.overdue = mine.filter((t) => t.bucket === 'overdue').length;
+    p.soon = mine.filter((t) => t.bucket === 'today' || t.bucket === 'soon').length;
+    p.later = mine.filter((t) => t.bucket === 'later').length;
+    p.tbd = mine.filter((t) => t.bucket === 'tbd' || t.bucket === 'nodate').length;
+    const next = mine.filter((t) => t.bucket === 'today' || t.bucket === 'soon' || t.bucket === 'later').sort((a, b) => a.due_at.localeCompare(b.due_at))[0];
+    p.next = next ? { title: next.title, due_at: next.due_at, days: daysBetween(today, next.due_at.slice(0, 10)) } : null;
+  }
+
+  const ws = weekStartOf(today);
+  const { results: allHabits } = await env.DB.prepare(
+    `SELECT h.id, h.name, h.cadence,
+            EXISTS (SELECT 1 FROM habit_checks c WHERE c.habit_id = h.id AND c.day = ?1) AS done,
+            (SELECT MAX(c.day) FROM habit_checks c WHERE c.habit_id = h.id AND c.day BETWEEN ?2 AND ?3) AS week_day
+     FROM habits h WHERE h.active = 1 ORDER BY h.sort`
+  ).bind(today, ws, addDays(ws, 6)).all();
+  const habits = allHabits.filter((h) => h.cadence !== 'weekly').map((h) => ({ id: h.id, name: h.name, done: h.done }));
+  const weekly = allHabits.filter((h) => h.cadence === 'weekly').map((h) => ({ id: h.id, name: h.name, done: h.week_day ? 1 : 0, done_day: h.week_day || null }));
+  const { results: vehicles } = await env.DB.prepare('SELECT id, name, plate, mileage FROM vehicles ORDER BY name').all();
+  const counts = await env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM links WHERE done = 0) AS links_open,
+            (SELECT COUNT(*) FROM links) AS links_total,
+            (SELECT COUNT(*) FROM wishlist WHERE status NOT IN ('Bought','Gave up')) AS wishlist_open`
+  ).first();
+
+  return {
+    now, kpis: { ...k, due: k.overdue + k.today, overdueDelta: k.overdue - overdueYesterday, inbox: inbox.length },
+    oldestOverdue: overdue[0] ? { title: overdue[0].title, project: overdue[0].project, days: daysBetween(overdue[0].due_at.slice(0, 10), today) } : null,
+    nextSoon: soon[0] ? { title: soon[0].title, due_at: soon[0].due_at } : null,
+    focus, projects: projects.filter((p) => p.open > 0), allProjects: projects, habits, weekly, weekStart: ws, vehicles, counts,
+  };
+}
+
+// ---------- API: calendar ----------
+let icsCache = { url: null, at: 0, events: null };
+async function calendarSource(env) {
+  if (env.GCAL_ICS_URL) {
+    if (icsCache.url === env.GCAL_ICS_URL && icsCache.events && Date.now() - icsCache.at < 10 * 60e3) return icsCache.events;
+    try {
+      const r = await fetch(env.GCAL_ICS_URL, { cf: { cacheTtl: 300 } });
+      if (r.ok) {
+        const events = parseICS(await r.text(), cfg.tz);
+        icsCache = { url: env.GCAL_ICS_URL, at: Date.now(), events };
+        return events;
+      }
+    } catch { /* fall back to stored events */ }
+  }
+  const { results } = await env.DB.prepare('SELECT id, title, starts_at, ends_at, all_day, rrule, location, color_key FROM events').all();
+  return results.map((e) => ({ ...e, exdates: [], overrides: [] }));
+}
+async function events(env, url) {
+  const today = localNow().date;
+  let start = url.searchParams.get('start');
+  if (!isDay(start)) { const dow = new Date(today + 'T00:00:00Z').getUTCDay(); start = addDays(today, -dow); }
+  const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '7', 10) || 7, 1), 42);
+  const end = addDays(start, days);
+  const google = await googleState(env);
+  let evs = null, source = 'stored', calendarError = null;
+  if (google.connected) {
+    try { evs = await googleEvents(env, start, end, { fresh: url.searchParams.get('fresh') === '1' }); source = 'google'; }
+    catch (e) { console.error('google events', e.message); calendarError = e.message; }
+  }
+  if (!evs) evs = expandEvents(await calendarSource(env), start, end);
+  const { results } = await env.DB.prepare(
+    `SELECT t.id, t.title, t.due_at, t.notes, p.short_name AS project FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
+     WHERE t.status = 'open' AND t.kind = 'task' AND t.date_tbd = 0 AND t.due_at IS NOT NULL AND substr(t.due_at,1,10) >= ?1 AND substr(t.due_at,1,10) < ?2
+     ORDER BY t.due_at`
+  ).bind(start, end).all();
+  const deadlines = results.map((t) => ({ ...t, day: t.due_at.slice(0, 10), state: t.due_at.slice(0, 10) < today ? 'overdue' : t.due_at.slice(0, 10) === today ? 'today' : 'upcoming' }));
+  const wcfg = await wakeConfig(env);
+  const wake = {};
+  for (let d = start; d < end; d = addDays(d, 1)) wake[d] = wakeFor(wcfg, d);
+  return { start, end, today, now: localNow().time, events: evs, deadlines, wake, wakeDefaults: { default: wcfg.default, weekdays: wcfg.weekdays }, source, calendarError, google: { configured: google.configured, connected: google.connected, needsReconnect: !!google.needsReconnect } };
+}
+
+// ---------- API: tasks ----------
+async function listTasks(env, url) {
+  const today = localNow().date;
+  const view = url.searchParams.get('view') || 'open';
+  const project = url.searchParams.get('project');
+  let rows = await openTasks(env);
+  if (view === 'inbox') rows = rows.filter((t) => t.kind === 'inbox');
+  else rows = rows.filter((t) => t.kind === 'task');
+  if (project) rows = rows.filter((t) => t.project_id === project);
+  for (const t of rows) { t.bucket = bucket(t, today); t.days = t.due_at ? daysBetween(today, t.due_at.slice(0, 10)) : null; }
+  if (['overdue', 'today', 'soon', 'later', 'tbd', 'nodate'].includes(view)) rows = rows.filter((t) => t.bucket === view);
+  if (url.searchParams.get('include') === 'done') {
+    const { results } = await env.DB.prepare(`SELECT t.*, p.short_name AS project FROM tasks t LEFT JOIN projects p ON p.id = t.project_id WHERE t.status = 'done' ${project ? 'AND t.project_id = ?1' : ''} ORDER BY t.done_at DESC LIMIT 50`).bind(...(project ? [project] : [])).all();
+    return { today, tasks: rows, done: results };
+  }
+  return { today, tasks: rows };
+}
+async function createTask(env, b, kind = 'task') {
+  const title = str(b.title, 300);
+  if (!title) return bad('title is required');
+  if (b.due_at && !isDue(b.due_at)) return bad('due_at must be YYYY-MM-DD or YYYY-MM-DDTHH:MM');
+  const id = newId();
+  await env.DB.prepare('INSERT INTO tasks (id, title, project_id, kind, due_at, url, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
+    .bind(id, title, b.project_id || null, b.kind === 'inbox' ? 'inbox' : kind, b.due_at || null, str(b.url, 2000) || null, str(b.notes, 4000) || null).run();
+  return json({ id }, 201);
+}
+async function updateTask(env, id, b) {
+  const sets = [], vals = [];
+  const add = (col, v) => { sets.push(`${col} = ?${vals.length + 1}`); vals.push(v); };
+  if ('title' in b) { const t = str(b.title, 300); if (!t) return bad('title cannot be empty'); add('title', t); }
+  if ('due_at' in b) { if (b.due_at && !isDue(b.due_at)) return bad('bad due_at'); add('due_at', b.due_at || null); add('date_tbd', 0); }
+  if ('project_id' in b) add('project_id', b.project_id || null);
+  if ('notes' in b) add('notes', str(b.notes, 4000) || null);
+  if ('kind' in b && ['task', 'inbox'].includes(b.kind)) add('kind', b.kind);
+  if ('status' in b) {
+    if (!['open', 'done', 'cancelled'].includes(b.status)) return bad('bad status');
+    add('status', b.status); add('done_at', b.status === 'done' ? new Date().toISOString() : null);
+  }
+  if (!sets.length) return bad('nothing to update');
+  add('updated_at', new Date().toISOString());
+  const r = await env.DB.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?${vals.length + 1}`).bind(...vals, id).run();
+  return r.meta.changes ? json({ ok: true }) : bad('not found', 404);
+}
+
+// ---------- API: projects ----------
+async function projectDetail(env, id) {
+  const p = await env.DB.prepare('SELECT * FROM projects WHERE id = ?1').bind(id).first();
+  if (!p) return bad('not found', 404);
+  const url = new URL('http://x/?view=open&include=done&project=' + encodeURIComponent(id));
+  return json({ project: p, ...(await listTasks(env, url)) });
+}
+
+// ---------- API: habits ----------
+// Weeks run Sunday to Saturday, like the calendar.
+export const weekStartOf = (day) => addDays(day, -dowOf(day));
+const CADENCES = ['daily', 'weekly'];
+async function toggleHabit(env, id, b) {
+  const day = isDay(b.day) ? b.day : localNow().date;
+  const h = await env.DB.prepare('SELECT cadence FROM habits WHERE id = ?1').bind(id).first();
+  if (!h) return bad('not found', 404);
+  if (h.cadence === 'weekly') {
+    // Weekly: any check this week counts. Unchecking clears the week; checking marks the given day.
+    const ws = weekStartOf(day), we = addDays(ws, 6);
+    const r = await env.DB.prepare('DELETE FROM habit_checks WHERE habit_id = ?1 AND day BETWEEN ?2 AND ?3').bind(id, ws, we).run();
+    if (r.meta.changes) return json({ done: false });
+    await env.DB.prepare('INSERT INTO habit_checks (habit_id, day) VALUES (?1, ?2)').bind(id, day).run();
+    return json({ done: true, day });
+  }
+  const existing = await env.DB.prepare('SELECT 1 FROM habit_checks WHERE habit_id = ?1 AND day = ?2').bind(id, day).first();
+  if (existing) await env.DB.prepare('DELETE FROM habit_checks WHERE habit_id = ?1 AND day = ?2').bind(id, day).run();
+  else await env.DB.prepare('INSERT INTO habit_checks (habit_id, day) VALUES (?1, ?2)').bind(id, day).run();
+  return json({ done: !existing });
+}
+// Adding a name that exists (even hidden) brings that habit back with its history.
+async function createHabit(env, b) {
+  const name = str(b.name, 80);
+  if (!name) return bad('name is required');
+  const cadence = CADENCES.includes(b.cadence) ? b.cadence : null;
+  const existing = await env.DB.prepare('SELECT id, name, active, cadence FROM habits WHERE lower(name) = lower(?1)').bind(name).first();
+  if (existing) {
+    // Re-adding an existing name brings it back and/or switches it to the cadence asked for.
+    const to = cadence || existing.cadence;
+    const moved = !!existing.active && to !== existing.cadence;
+    if (!existing.active || moved) await env.DB.prepare('UPDATE habits SET active = 1, cadence = ?2 WHERE id = ?1').bind(existing.id, to).run();
+    return json({ id: existing.id, name: existing.name, cadence: to, restored: !existing.active, moved, existed: !!existing.active && !moved });
+  }
+  const id = newId();
+  await env.DB.prepare('INSERT INTO habits (id, name, sort, active, cadence) VALUES (?1, ?2, (SELECT COALESCE(MAX(sort), -1) + 1 FROM habits), 1, ?3)').bind(id, name, cadence || 'daily').run();
+  return json({ id, name, cadence: cadence || 'daily' }, 201);
+}
+async function updateHabit(env, id, b) {
+  const sets = [], vals = [];
+  if ('name' in b) {
+    const name = str(b.name, 80);
+    if (!name) return bad('name cannot be empty');
+    const clash = await env.DB.prepare('SELECT 1 FROM habits WHERE lower(name) = lower(?1) AND id != ?2').bind(name, id).first();
+    if (clash) return bad('another habit already has that name');
+    sets.push(`name = ?${vals.push(name)}`);
+  }
+  if ('active' in b) sets.push(`active = ?${vals.push(b.active ? 1 : 0)}`);
+  if ('cadence' in b) { if (!CADENCES.includes(b.cadence)) return bad('cadence must be daily or weekly'); sets.push(`cadence = ?${vals.push(b.cadence)}`); }
+  if (!sets.length) return bad('nothing to update');
+  const r = await env.DB.prepare(`UPDATE habits SET ${sets.join(', ')} WHERE id = ?${vals.length + 1}`).bind(...vals, id).run();
+  return r.meta.changes ? json({ ok: true }) : bad('not found', 404);
+}
+async function habitHistory(env) {
+  const today = localNow().date;
+  const from = addDays(today, -27);
+  const weekStart = weekStartOf(today), weeksFrom = addDays(weekStart, -7 * 11); // 12 weeks for weekly habits
+  const { results: habits } = await env.DB.prepare('SELECT id, name, cadence FROM habits WHERE active = 1 ORDER BY sort').all();
+  const { results: checks } = await env.DB.prepare('SELECT habit_id, day FROM habit_checks WHERE day >= ?1').bind(weeksFrom < from ? weeksFrom : from).all();
+  return json({ today, from, weekStart, weeksFrom, habits, checks });
+}
+
+// ---------- API: links (Job Apps & More) ----------
+async function fetchTitle(u) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch(u, { signal: ctrl.signal, headers: { 'user-agent': 'Mozilla/5.0 Batcave' }, redirect: 'follow' });
+    clearTimeout(timer);
+    const text = (await r.text()).slice(0, 65536);
+    const m = text.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
+    return m ? m[1].replace(/\s+/g, ' ').trim() : null;
+  } catch { return null; }
+}
+async function createLink(env, b) {
+  let u = str(b.url, 2000);
+  if (!u) return bad('url is required');
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try { new URL(u); } catch { return bad('invalid url'); }
+  const title = str(b.title, 300) || (await fetchTitle(u)) || u;
+  const id = newId();
+  await env.DB.prepare('INSERT INTO links (id, title, url, added_on) VALUES (?1, ?2, ?3, ?4)').bind(id, title, u, localNow().date).run();
+  return json({ id, title, url: u }, 201);
+}
+
+// ---------- API: Google Calendar ----------
+async function googleApi(req, env, url, path, m) {
+  try {
+    if (path === '/api/google/connect' && m === 'GET') return googleConnect(req, env, url);
+    if (path === '/api/google/callback' && m === 'GET') return await googleCallback(req, env, url);
+    if (path === '/api/google/status' && m === 'GET') {
+      const s = await googleState(env);
+      return json({ ...s, calendars: s.connected ? await listCalendars(env) : [] });
+    }
+    if (path === '/api/google/sync' && m === 'POST') return json({ calendars: await syncCalendars(env) });
+    if (path === '/api/google/calendars' && m === 'POST') {
+      const b = await body(req);
+      return (await setCalendarShown(env, String(b.id || ''), !!b.shown)) ? json({ ok: true }) : bad('not found', 404);
+    }
+    if (path === '/api/google/disconnect' && m === 'POST') { await googleDisconnect(env); return json({ ok: true }); }
+    if (path === '/api/calendar/events' && m === 'POST') return json(await createEvent(env, await body(req)), 201);
+    if (path === '/api/calendar/event' && m === 'GET') return json(await getEvent(env, { calendar_id: url.searchParams.get('calendar_id'), event_id: url.searchParams.get('event_id') }));
+    if (path === '/api/calendar/events/update' && m === 'POST') return json(await updateEvent(env, await body(req)));
+    if (path === '/api/calendar/events/delete' && m === 'POST') return json(await cancelEvent(env, await body(req)));
+    if (path === '/api/calendar/events/restore' && m === 'POST') return json(await restoreEvent(env, await body(req)));
+    return bad('not found', 404);
+  } catch (e) {
+    if (!(e instanceof GoogleError)) throw e;
+    const status = { not_connected: 409, reauth: 409, bad_input: 400, not_found: 404 }[e.code] || 502;
+    return bad(e.message, status);
+  }
+}
+
+// ---------- router ----------
+async function api(req, env, url) {
+  const m = req.method;
+  const path = url.pathname.replace(/\/+$/, '');
+  let match;
+  if (path === '/api/chat' && m === 'POST') return chat(req, env, alfredLib());
+  if (path.startsWith('/api/google/') || path.startsWith('/api/calendar/')) return googleApi(req, env, url, path, m);
+  if (path === '/api/dashboard' && m === 'GET') return json(await dashboard(env));
+  if (path === '/api/wake' && m === 'GET') return json(await wakeConfig(env));
+  if (path === '/api/wake' && m === 'POST') return setWake(env, (await body(req)).changes);
+  if (path === '/api/events' && m === 'GET') return json(await events(env, url));
+  if (path === '/api/tasks' && m === 'GET') return json(await listTasks(env, url));
+  if (path === '/api/tasks' && m === 'POST') return createTask(env, await body(req));
+  if ((match = path.match(/^\/api\/tasks\/([\w-]+)$/))) {
+    if (m === 'PATCH') return updateTask(env, match[1], await body(req));
+    if (m === 'DELETE') { await env.DB.prepare('DELETE FROM tasks WHERE id = ?1').bind(match[1]).run(); return json({ ok: true }); }
+  }
+  if (path === '/api/projects' && m === 'GET') { const d = await dashboard(env); return json({ projects: d.allProjects }); }
+  if ((match = path.match(/^\/api\/projects\/([\w-]+)$/)) && m === 'GET') return projectDetail(env, match[1]);
+  if (path === '/api/habits' && m === 'GET') return habitHistory(env);
+  if (path === '/api/habits' && m === 'POST') return createHabit(env, await body(req));
+  if ((match = path.match(/^\/api\/habits\/([\w-]+)$/)) && m === 'PATCH') return updateHabit(env, match[1], await body(req));
+  if ((match = path.match(/^\/api\/habits\/([\w-]+)\/toggle$/)) && m === 'POST') return toggleHabit(env, match[1], await body(req));
+  if (path === '/api/links' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT * FROM links ORDER BY added_on DESC, created_at DESC LIMIT 500').all();
+    return json({ links: results });
+  }
+  if (path === '/api/links' && m === 'POST') return createLink(env, await body(req));
+  if ((match = path.match(/^\/api\/links\/([\w-]+)$/)) && m === 'PATCH') {
+    const b = await body(req);
+    await env.DB.prepare('UPDATE links SET done = COALESCE(?1, done), needs_manual = COALESCE(?2, needs_manual) WHERE id = ?3')
+      .bind('done' in b ? (b.done ? 1 : 0) : null, 'needs_manual' in b ? (b.needs_manual ? 1 : 0) : null, match[1]).run();
+    return json({ ok: true });
+  }
+  if (path === '/api/garage' && m === 'GET') {
+    const { results: vehicles } = await env.DB.prepare('SELECT * FROM vehicles ORDER BY name').all();
+    const { results: logs } = await env.DB.prepare('SELECT * FROM vehicle_logs ORDER BY day DESC').all();
+    return json({ vehicles, logs });
+  }
+  if (path === '/api/garage/logs' && m === 'POST') {
+    const b = await body(req);
+    if (!b.vehicle_id || !str(b.title)) return bad('vehicle_id and title are required');
+    if (!['maintenance', 'ticket', 'insurance'].includes(b.kind)) return bad('kind must be maintenance, ticket or insurance');
+    const id = newId();
+    await env.DB.prepare('INSERT INTO vehicle_logs (id, vehicle_id, kind, day, title, cost, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
+      .bind(id, b.vehicle_id, b.kind, isDay(b.day) ? b.day : localNow().date, str(b.title, 300), Number.isFinite(+b.cost) && b.cost !== '' ? +b.cost : null, str(b.notes, 2000) || null).run();
+    if (b.mileage && Number.isFinite(+b.mileage)) await env.DB.prepare('UPDATE vehicles SET mileage = ?1 WHERE id = ?2').bind(Math.round(+b.mileage), b.vehicle_id).run();
+    return json({ id }, 201);
+  }
+  if (path === '/api/wishlist' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT * FROM wishlist ORDER BY created_at DESC').all();
+    return json({ items: results });
+  }
+  if (path === '/api/wishlist' && m === 'POST') {
+    const b = await body(req);
+    const name = str(b.name, 300);
+    if (!name) return bad('name is required');
+    const id = newId();
+    await env.DB.prepare('INSERT INTO wishlist (id, name, category, status, price, link) VALUES (?1, ?2, ?3, ?4, ?5, ?6)')
+      .bind(id, name, str(b.category, 60) || null, 'Searching', Number.isFinite(+b.price) && b.price !== '' ? +b.price : null, str(b.link, 2000) || null).run();
+    return json({ id }, 201);
+  }
+  if ((match = path.match(/^\/api\/wishlist\/([\w-]+)$/)) && m === 'PATCH') {
+    const b = await body(req);
+    if (!['Searching', 'Waiting for discount', 'Saving money', 'Bought', 'Gave up'].includes(b.status)) return bad('bad status');
+    await env.DB.prepare('UPDATE wishlist SET status = ?1, acquired_on = CASE WHEN ?1 = \'Bought\' THEN ?2 ELSE acquired_on END WHERE id = ?3').bind(b.status, localNow().date, match[1]).run();
+    return json({ ok: true });
+  }
+  return bad('not found', 404);
+}
+
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+};
+const withHeaders = (res) => { const r = new Response(res.body, res); for (const [k, v] of Object.entries(SECURITY_HEADERS)) r.headers.set(k, v); return r; };
+
+const html = (markup, status = 200, extra = {}) => withHeaders(new Response(markup, { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', ...extra } }));
+const redirect = (location, extra = {}) => withHeaders(new Response(null, { status: 303, headers: { location, 'cache-control': 'no-store', ...extra } }));
+const crossSite = (req, url) => { const o = req.headers.get('origin'); return Boolean(o) && o !== url.origin; };
+const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Public page for Google's OAuth consent screen ("privacy policy" link). Filled in from your config.
+function privacyPage(host) {
+  const app = escHtml(cfg.app), who = escHtml(cfg.ownerFull || cfg.owner);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${app} · Privacy</title>
+<style>body{margin:0;background:#0F1012;color:#E6E6E8;font:16px/1.6 system-ui,-apple-system,sans-serif}main{max-width:680px;margin:0 auto;padding:40px 20px}h1{font-size:26px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 6px}p,li{color:#C9CBD1}a{color:#B4B7FF}</style></head>
+<body><main><h1>${app} privacy policy</h1>
+<p>${app} (${escHtml(host)}) is a private, password-protected personal dashboard used only by its owner${who ? `, ${who}` : ''}. It is not offered to the public.</p>
+<h2>Google Calendar data</h2><ul>
+<li>When the owner connects Google Calendar, ${app} reads events from the calendars the owner chooses so they appear on the dashboard, and creates, moves or cancels events only when the owner asks it to.</li>
+<li>Event data is fetched on demand and held only briefly in memory to draw the page. The Google sign-in token is stored encrypted and is used only to talk to Google Calendar on the owner's behalf.</li>
+<li>${app} does not sell, share, or transfer Google user data to anyone, does not use it for advertising, and does not use it to train AI models. Requests the owner types into the built-in assistant may be sent to OpenAI to generate a reply.</li>
+<li>${app}'s use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</li></ul>
+<h2>Disconnecting</h2><p>The owner can disconnect Google Calendar from the dashboard at any time, which revokes the token and deletes it, or remove access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</p>
+${cfg.contact ? `<h2>Contact</h2><p>${escHtml(cfg.contact)}</p>` : ''}</main></body></html>`;
+}
+const PUBLIC_ASSETS = new Set(['/moon.svg', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png']);
+
+// Home-screen app manifest, named from your config.
+async function manifest(env, req) {
+  const base = await (await env.ASSETS.fetch(req)).json().catch(() => ({}));
+  const body = { ...base, name: cfg.app, short_name: cfg.app, description: cfg.owner ? `${cfg.owner}'s command center` : 'Personal command center' };
+  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/manifest+json; charset=utf-8', 'cache-control': 'no-cache' } });
+}
+// The app page: put your settings into the HTML before it reaches the browser (no flash of defaults).
+function personalize(res) {
+  if (!(res.headers.get('content-type') || '').includes('text/html')) return res;
+  const ask = `Ask ${cfg.assistant}`;
+  const json = JSON.stringify(publicConfig()).replace(/</g, '\\u003c');
+  return new HTMLRewriter()
+    .on('title', { element(el) { el.setInnerContent(cfg.app); } })
+    .on('meta[name="apple-mobile-web-app-title"]', { element(el) { el.setAttribute('content', cfg.app); } })
+    .on('[data-cfg="app"]', { element(el) { el.setInnerContent(cfg.app); } })
+    .on('[data-cfg="ask"]', { element(el) { el.setInnerContent(ask); } })
+    .on('[data-cfg-title="ask"]', { element(el) { el.setAttribute('title', `${ask} (/)`); } })
+    .on('[data-cfg-label="ask"]', { element(el) { el.setAttribute('aria-label', ask); } })
+    .on('[data-cfg="tagline"]', { element(el) { if (cfg.tagline) el.setInnerContent(cfg.tagline); else el.remove(); } })
+    .on('head', { element(el) { el.append(`<script>window.__CFG=${json};</script>`, { html: true }); } })
+    .transform(res);
+}
+
+// What Alfred's tools call into (chat window and to-do API).
+const alfredLib = () => ({ dashboard, events, wakeConfig, setWake, weekStartOf, listTasks, createTask, updateTask, createLink, createHabit, updateHabit, localNow, addDays, bucket, google: { state: googleState, listCalendars, createEvent, updateEvent, cancelEvent, GoogleError } });
+
+// POST /api/ingest/todo — JSON {text | title | name | task, notes?, due_at?, url?, source?, alfred?} or a plain-text body.
+// ?format=text answers with just Alfred's sentence (handy for a phone/Mac shortcut notification).
+async function ingestTodo(req, env, url) {
+  const type = req.headers.get('content-type') || '';
+  let b = {};
+  if (type.includes('application/json')) b = await body(req);
+  else { const raw = (await req.text().catch(() => '')).trim(); try { b = JSON.parse(raw); } catch { b = { text: raw }; } }
+  if (!b || typeof b !== 'object') b = {};
+  const asText = url.searchParams.get('format') === 'text';
+  const text = str(b.text ?? b.todo ?? b.title ?? b.name ?? b.task ?? b.message, 2000);
+  if (!text) return asText ? plain('Nothing to add: the to-do was empty.', 400) : bad('send the to-do as {"text": "..."} or as a plain-text body');
+  if (b.due_at && !isDue(b.due_at)) return bad('due_at must be YYYY-MM-DD or YYYY-MM-DDTHH:MM');
+  const alfred = !(b.alfred === false || ['0', 'false', 'no'].includes(url.searchParams.get('alfred')));
+  const r = await processTodo(env, alfredLib(), { text, notes: str(b.notes, 2000), due_at: b.due_at || null, url: str(b.url, 2000), source: str(b.source, 60), alfred });
+  if (asText) return plain(r.body.reply || r.body.error || 'Done.', r.status);
+  return json(r.body, r.status);
+}
+
+async function login(req, env, url) {
+  if (crossSite(req, url)) return bad('forbidden', 403);
+  if (!authConfigured(env)) return html(loginPage({ error: 'Login is not set up yet.' }), 503);
+  const ip = req.headers.get('cf-connecting-ip') || 'local';
+  if (await lockedOut(env, ip)) return html(loginPage({ error: 'Too many wrong attempts. Try again in 15 minutes.' }), 429);
+  let form;
+  try { form = await req.formData(); } catch { return html(loginPage({ error: 'Something went wrong. Try again.' }), 400); }
+  const next = form.get('next');
+  if (!(await checkPassword(String(form.get('password') || ''), env.PASSWORD_HASH))) {
+    await recordFailure(env, ip);
+    return html(loginPage({ error: 'Wrong password.', next: safeNext(next), hash: form.get('hash') }), 401);
+  }
+  await clearFailures(env, ip);
+  return redirect(safeNext(next, form.get('hash')), { 'set-cookie': await makeSessionCookie(env) });
+}
+
+export default {
+  async fetch(req, env) {
+    loadConfig(env);
+    const url = new URL(req.url);
+    try {
+      if (url.pathname.startsWith('/api/ingest/')) {
+        if (!(await verifyIngest(req, env))) return bad('unauthorized', 401);
+        if (url.pathname === '/api/ingest/todo' && req.method === 'POST') return withHeaders(await ingestTodo(req, env, url));
+        if (url.pathname === '/api/ingest/link' && req.method === 'POST') return withHeaders(await createLink(env, await body(req)));
+        return bad('not found', 404);
+      }
+      if (url.pathname === '/login') {
+        if (req.method === 'POST') return await login(req, env, url);
+        if (await hasSession(req, env)) return redirect(safeNext(url.searchParams.get('next')));
+        return html(loginPage({ next: safeNext(url.searchParams.get('next')) }));
+      }
+      if (url.pathname === '/logout' && req.method === 'POST') {
+        if (crossSite(req, url)) return bad('forbidden', 403);
+        return redirect('/login', { 'set-cookie': clearSessionCookie() });
+      }
+      if (PUBLIC_ASSETS.has(url.pathname)) return withHeaders(await env.ASSETS.fetch(req));
+      if (url.pathname === '/manifest.webmanifest') return withHeaders(await manifest(env, req));
+      if (url.pathname === '/privacy') return html(privacyPage(url.host));
+
+      const authed = env.DEV_BYPASS === '1' || (await hasSession(req, env));
+      if (!authed) {
+        if (url.pathname.startsWith('/api/')) return bad('unauthorized', 401);
+        return redirect('/login' + (url.pathname === '/' ? '' : '?next=' + encodeURIComponent(url.pathname + url.search)));
+      }
+      if (url.pathname.startsWith('/api/')) {
+        if (!['GET', 'HEAD'].includes(req.method) && crossSite(req, url)) return bad('forbidden', 403);
+        return withHeaders(await api(req, env, url));
+      }
+      return withHeaders(personalize(await env.ASSETS.fetch(req)));
+    } catch (err) {
+      console.error(err);
+      return bad('server error', 500);
+    }
+  },
+};
