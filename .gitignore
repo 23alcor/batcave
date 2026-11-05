@@ -9,6 +9,7 @@ wrangler.dry-run.jsonc
 .env
 .site-password
 scripts/notion.config.json
+CLAUDE.local.md
 
 # Personal data exports (Notion import, database snapshots)
 seed/

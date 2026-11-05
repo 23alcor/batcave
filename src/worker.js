@@ -5,6 +5,7 @@ import { chat, processTodo } from './chat.js';
 import { cfg, loadConfig, publicConfig } from './config.js';
 import { GoogleError, callback as googleCallback, cancelEvent, connect as googleConnect, createEvent, disconnect as googleDisconnect, getEvent, googleEvents, googleState, listCalendars, restoreEvent, setCalendarShown, syncCalendars, updateEvent } from './google.js';
 import { authConfigured, checkPassword, clearFailures, clearSessionCookie, hasSession, lockedOut, loginPage, makeSessionCookie, recordFailure, safeNext } from './auth.js';
+import { summarizePending, transcriptsApi, transcriptsIngest } from './transcripts.js';
 
 
 // ---------- helpers ----------
@@ -142,17 +143,39 @@ async function dashboard(env) {
   const weekly = allHabits.filter((h) => h.cadence === 'weekly').map((h) => ({ id: h.id, name: h.name, done: h.week_day ? 1 : 0, done_day: h.week_day || null }));
   const { results: vehicles } = await env.DB.prepare('SELECT id, name, plate, mileage FROM vehicles ORDER BY name').all();
   const counts = await env.DB.prepare(
-    `SELECT (SELECT COUNT(*) FROM links WHERE done = 0) AS links_open,
-            (SELECT COUNT(*) FROM links) AS links_total,
-            (SELECT COUNT(*) FROM wishlist WHERE status NOT IN ('Bought','Gave up')) AS wishlist_open`
+    `SELECT (SELECT COUNT(*) FROM wishlist WHERE status NOT IN ('Bought','Gave up')) AS wishlist_open`
   ).first();
+  const slim = (t) => ({ id: t.id, title: t.title, project: t.project, due_at: t.due_at, date_tbd: t.date_tbd, days: daysBetween(today, t.due_at.slice(0, 10)) });
+  const layoutRow = await env.DB.prepare("SELECT value FROM meta WHERE key = 'home:layout'").first();
 
   return {
     now, kpis: { ...k, due: k.overdue + k.today, overdueDelta: k.overdue - overdueYesterday, inbox: inbox.length },
     oldestOverdue: overdue[0] ? { title: overdue[0].title, project: overdue[0].project, days: daysBetween(overdue[0].due_at.slice(0, 10), today) } : null,
     nextSoon: soon[0] ? { title: soon[0].title, due_at: soon[0].due_at } : null,
     focus, projects: projects.filter((p) => p.open > 0), allProjects: projects, habits, weekly, weekStart: ws, vehicles, counts,
+    due: { overdue: overdue.slice(0, 8).map(slim), today: dueToday.slice(0, 8).map(slim), soon: soon.slice(0, 8).map(slim) },
+    layout: cleanLayout(safeJson(layoutRow?.value)),
   };
+}
+
+// ---------- API: home screen layout (widget order and sizes) ----------
+const safeJson = (s) => { try { return JSON.parse(s); } catch { return null; } };
+// A list of { id, size } in screen order; the browser knows which widget ids exist and drops unknown ones.
+function cleanLayout(v) {
+  if (!Array.isArray(v) || v.length > 40) return null;
+  const out = [];
+  for (const w of v) {
+    if (!w || typeof w.id !== 'string' || !/^[a-z][a-z0-9-]{0,30}$/.test(w.id) || !['s', 'm', 'l'].includes(w.size)) return null;
+    out.push({ id: w.id, size: w.size });
+  }
+  return out;
+}
+async function saveLayout(env, b) {
+  if (b.layout === null) { await env.DB.prepare("DELETE FROM meta WHERE key = 'home:layout'").run(); return json({ ok: true }); }
+  const layout = cleanLayout(b.layout);
+  if (!layout) return bad('layout must be a list of { id, size } with size s, m or l');
+  await env.DB.prepare("INSERT INTO meta (key, value) VALUES ('home:layout', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(JSON.stringify(layout)).run();
+  return json({ ok: true });
 }
 
 // ---------- API: calendar ----------
@@ -242,6 +265,28 @@ async function updateTask(env, id, b) {
 }
 
 // ---------- API: projects ----------
+async function createProject(env, b) {
+  const name = str(b.name, 120);
+  if (!name) return bad('name is required');
+  const id = newId();
+  await env.DB.prepare('INSERT INTO projects (id, name, short_name, sort) VALUES (?1, ?2, ?2, (SELECT COALESCE(MAX(sort), 0) + 1 FROM projects))').bind(id, name).run();
+  return json({ id, name }, 201);
+}
+async function updateProject(env, id, b) {
+  const sets = [], vals = [];
+  if ('name' in b) {
+    const name = str(b.name, 120);
+    if (!name) return bad('name is required');
+    vals.push(name); sets.push('name = ?1', 'short_name = ?1');
+  }
+  if ('archived' in b) {
+    if (typeof b.archived !== 'boolean') return bad('archived must be a boolean');
+    vals.push(b.archived ? 1 : 0); sets.push(`archived = ?${vals.length}`);
+  }
+  if (!sets.length) return bad('nothing to update');
+  const r = await env.DB.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?${vals.length + 1}`).bind(...vals, id).run();
+  return r.meta.changes ? json({ ok: true }) : bad('not found', 404);
+}
 async function projectDetail(env, id) {
   const p = await env.DB.prepare('SELECT * FROM projects WHERE id = ?1').bind(id).first();
   if (!p) return bad('not found', 404);
@@ -311,29 +356,6 @@ async function habitHistory(env) {
   return json({ today, from, weekStart, weeksFrom, habits, checks });
 }
 
-// ---------- API: links (Job Apps & More) ----------
-async function fetchTitle(u) {
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 4000);
-    const r = await fetch(u, { signal: ctrl.signal, headers: { 'user-agent': 'Mozilla/5.0 Batcave' }, redirect: 'follow' });
-    clearTimeout(timer);
-    const text = (await r.text()).slice(0, 65536);
-    const m = text.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
-    return m ? m[1].replace(/\s+/g, ' ').trim() : null;
-  } catch { return null; }
-}
-async function createLink(env, b) {
-  let u = str(b.url, 2000);
-  if (!u) return bad('url is required');
-  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
-  try { new URL(u); } catch { return bad('invalid url'); }
-  const title = str(b.title, 300) || (await fetchTitle(u)) || u;
-  const id = newId();
-  await env.DB.prepare('INSERT INTO links (id, title, url, added_on) VALUES (?1, ?2, ?3, ?4)').bind(id, title, u, localNow().date).run();
-  return json({ id, title, url: u }, 201);
-}
-
 // ---------- API: Google Calendar ----------
 async function googleApi(req, env, url, path, m) {
   try {
@@ -363,13 +385,15 @@ async function googleApi(req, env, url, path, m) {
 }
 
 // ---------- router ----------
-async function api(req, env, url) {
+async function api(req, env, url, ctx) {
   const m = req.method;
   const path = url.pathname.replace(/\/+$/, '');
   let match;
   if (path === '/api/chat' && m === 'POST') return chat(req, env, alfredLib());
+  if (path === '/api/transcripts' || path.startsWith('/api/transcripts/')) return (await transcriptsApi(req, env, url, ctx)) || bad('not found', 404);
   if (path.startsWith('/api/google/') || path.startsWith('/api/calendar/')) return googleApi(req, env, url, path, m);
   if (path === '/api/dashboard' && m === 'GET') return json(await dashboard(env));
+  if (path === '/api/home/layout' && m === 'PUT') return saveLayout(env, await body(req));
   if (path === '/api/wake' && m === 'GET') return json(await wakeConfig(env));
   if (path === '/api/wake' && m === 'POST') return setWake(env, (await body(req)).changes);
   if (path === '/api/events' && m === 'GET') return json(await events(env, url));
@@ -380,22 +404,15 @@ async function api(req, env, url) {
     if (m === 'DELETE') { await env.DB.prepare('DELETE FROM tasks WHERE id = ?1').bind(match[1]).run(); return json({ ok: true }); }
   }
   if (path === '/api/projects' && m === 'GET') { const d = await dashboard(env); return json({ projects: d.allProjects }); }
-  if ((match = path.match(/^\/api\/projects\/([\w-]+)$/)) && m === 'GET') return projectDetail(env, match[1]);
+  if (path === '/api/projects' && m === 'POST') return createProject(env, await body(req));
+  if ((match = path.match(/^\/api\/projects\/([\w-]+)$/))) {
+    if (m === 'GET') return projectDetail(env, match[1]);
+    if (m === 'PATCH') return updateProject(env, match[1], await body(req));
+  }
   if (path === '/api/habits' && m === 'GET') return habitHistory(env);
   if (path === '/api/habits' && m === 'POST') return createHabit(env, await body(req));
   if ((match = path.match(/^\/api\/habits\/([\w-]+)$/)) && m === 'PATCH') return updateHabit(env, match[1], await body(req));
   if ((match = path.match(/^\/api\/habits\/([\w-]+)\/toggle$/)) && m === 'POST') return toggleHabit(env, match[1], await body(req));
-  if (path === '/api/links' && m === 'GET') {
-    const { results } = await env.DB.prepare('SELECT * FROM links ORDER BY added_on DESC, created_at DESC LIMIT 500').all();
-    return json({ links: results });
-  }
-  if (path === '/api/links' && m === 'POST') return createLink(env, await body(req));
-  if ((match = path.match(/^\/api\/links\/([\w-]+)$/)) && m === 'PATCH') {
-    const b = await body(req);
-    await env.DB.prepare('UPDATE links SET done = COALESCE(?1, done), needs_manual = COALESCE(?2, needs_manual) WHERE id = ?3')
-      .bind('done' in b ? (b.done ? 1 : 0) : null, 'needs_manual' in b ? (b.needs_manual ? 1 : 0) : null, match[1]).run();
-    return json({ ok: true });
-  }
   if (path === '/api/garage' && m === 'GET') {
     const { results: vehicles } = await env.DB.prepare('SELECT * FROM vehicles ORDER BY name').all();
     const { results: logs } = await env.DB.prepare('SELECT * FROM vehicle_logs ORDER BY day DESC').all();
@@ -485,7 +502,7 @@ function personalize(res) {
 }
 
 // What Alfred's tools call into (chat window and to-do API).
-const alfredLib = () => ({ dashboard, events, wakeConfig, setWake, weekStartOf, listTasks, createTask, updateTask, createLink, createHabit, updateHabit, localNow, addDays, bucket, google: { state: googleState, listCalendars, createEvent, updateEvent, cancelEvent, GoogleError } });
+const alfredLib = () => ({ dashboard, events, wakeConfig, setWake, weekStartOf, listTasks, createTask, updateTask, createProject, updateProject, createHabit, updateHabit, localNow, addDays, bucket, google: { state: googleState, listCalendars, createEvent, updateEvent, cancelEvent, GoogleError } });
 
 // POST /api/ingest/todo — JSON {text | title | name | task, notes?, due_at?, url?, source?, alfred?} or a plain-text body.
 // ?format=text answers with just Alfred's sentence (handy for a phone/Mac shortcut notification).
@@ -495,9 +512,15 @@ async function ingestTodo(req, env, url) {
   if (type.includes('application/json')) b = await body(req);
   else { const raw = (await req.text().catch(() => '')).trim(); try { b = JSON.parse(raw); } catch { b = { text: raw }; } }
   if (!b || typeof b !== 'object') b = {};
+  const command = url.pathname === '/api/ingest/alfred';
   const asText = url.searchParams.get('format') === 'text';
   const text = str(b.text ?? b.todo ?? b.title ?? b.name ?? b.task ?? b.message, 2000);
-  if (!text) return asText ? plain('Nothing to add: the to-do was empty.', 400) : bad('send the to-do as {"text": "..."} or as a plain-text body');
+  if (!text) return asText ? plain('Send a message first.', 400) : bad('send {"text": "..."} or a plain-text body');
+  if (command) {
+    const res = await chat(new Request(req.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: text }] }) }), env, alfredLib());
+    const data = await res.json();
+    return asText ? plain(data.reply || data.error || 'Done.', res.status) : json({ handled_by: 'alfred', ...data }, res.status);
+  }
   if (b.due_at && !isDue(b.due_at)) return bad('due_at must be YYYY-MM-DD or YYYY-MM-DDTHH:MM');
   const alfred = !(b.alfred === false || ['0', 'false', 'no'].includes(url.searchParams.get('alfred')));
   const r = await processTodo(env, alfredLib(), { text, notes: str(b.notes, 2000), due_at: b.due_at || null, url: str(b.url, 2000), source: str(b.source, 60), alfred });
@@ -522,14 +545,14 @@ async function login(req, env, url) {
 }
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     loadConfig(env);
     const url = new URL(req.url);
     try {
       if (url.pathname.startsWith('/api/ingest/')) {
         if (!(await verifyIngest(req, env))) return bad('unauthorized', 401);
-        if (url.pathname === '/api/ingest/todo' && req.method === 'POST') return withHeaders(await ingestTodo(req, env, url));
-        if (url.pathname === '/api/ingest/link' && req.method === 'POST') return withHeaders(await createLink(env, await body(req)));
+        if (['/api/ingest/todo', '/api/ingest/alfred'].includes(url.pathname) && req.method === 'POST') return withHeaders(await ingestTodo(req, env, url));
+        if (url.pathname.startsWith('/api/ingest/transcripts')) return withHeaders((await transcriptsIngest(req, env, url, ctx)) || bad('not found', 404));
         return bad('not found', 404);
       }
       if (url.pathname === '/login') {
@@ -552,12 +575,17 @@ export default {
       }
       if (url.pathname.startsWith('/api/')) {
         if (!['GET', 'HEAD'].includes(req.method) && crossSite(req, url)) return bad('forbidden', 403);
-        return withHeaders(await api(req, env, url));
+        return withHeaders(await api(req, env, url, ctx));
       }
       return withHeaders(personalize(await env.ASSETS.fetch(req)));
     } catch (err) {
       console.error(err);
       return bad('server error', 500);
     }
+  },
+  // Optional cron (see wrangler.example.jsonc): summarize session transcripts that are still waiting.
+  async scheduled(event, env, ctx) {
+    loadConfig(env);
+    ctx.waitUntil(summarizePending(env).catch((e) => console.error('cron transcripts', e.message)));
   },
 };

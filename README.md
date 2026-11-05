@@ -1,7 +1,7 @@
 # Batcave
 
 A personal command center you host yourself: tasks and deadlines, a Google-Calendar-style week view with
-two-way Google Calendar sync, daily and weekly habits, wake-up times, job links, a wishlist, a garage log, and a
+two-way Google Calendar sync, daily and weekly habits, wake-up times, a wishlist, a garage log, and a
 chat assistant (a polite butler named Alfred by default) that can read and change all of it.
 
 It runs on Cloudflare Workers + D1 (the free plan is enough), has no build step, and is locked behind your own
@@ -11,16 +11,25 @@ password. Name it, rename the assistant, and set your time zone in one config fi
 
 ## What you get
 
-- **Command page**: overdue / due today / next 7 days, today's habits, and a week calendar.
+- **Command page** built from widgets: overdue, due today, next 7 days, daily habits, calendar, date, projects, focus, garage.
+  Choose **Settings → Edit home screen** (or hold a widget on a phone) to customize it like an iPhone home screen:
+  drag to rearrange, pick Small / Medium / Large, remove with −, or use **+ Add widget** in the bar that pops up.
+  The calendar widget shows your next events (small), the rest of today (medium) or the full week (large); the date
+  widget shows today like the iPhone's, with the month in medium and large. The layout is saved to your account.
+- **Settings** (bottom-left, or More on a phone): theme, home screen editing, sidebar, and Lock.
 - **Week calendar** you edit like Google Calendar: drag events to move them, drag the bottom edge to resize,
   click or drag on empty space to create, click an event for a details card. Changes go straight to Google
   Calendar. Tasks with a time sit in the grid too (tick to finish, drag to reschedule).
 - **Wake-up line** on every day (drag to change one day; click to set a weekday or the default).
+- **Projects page**: click **Edit** to add or delete projects. Deleting hides the project, keeps its tasks, and supports Undo / Redo.
 - **Daily page**: daily habits, weekly habits (done once each Sunday–Saturday week) and their history.
 - **Assistant** (bottom-left, press `/`): "what's overdue?", "move my dentist appointment to Friday at 3",
-  "add laundry as a weekly habit". It uses OpenAI with tools over your data; it adds and changes, never deletes.
+  "add laundry as a weekly habit". It uses OpenAI with tools over your data; it adds and changes, never permanently deletes.
   Give it a vague to-do and it picks a sensible time from your free slots.
 - **To-do API**: send a sentence from a phone shortcut or script; the assistant files it and answers.
+- **Sessions**: send in the transcript of a work or study session (a chat with an AI tool, a coding-agent run);
+  it's summarized into a short session note, matched to the right note, and handed to your notes app through a
+  small bridge (for example an Obsidian vault on your computer).
 - **Undo everywhere** with ⌘Z / Ctrl+Z, and an **iPhone** layout you can add to your home screen.
 
 ## Quick start
@@ -64,7 +73,7 @@ Secrets are set with `npx wrangler secret put NAME` and never stored in the repo
 | --- | --- |
 | `PASSWORD_HASH`, `SESSION_SECRET` | Login (set by `npm run set-password`) |
 | `OPENAI_API_KEY` | The assistant |
-| `INGEST_TOKEN` | The to-do API |
+| `INGEST_TOKEN` | The to-do API, the Alfred command API and the Sessions API |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google Calendar sync |
 
 ## Keyboard shortcuts
@@ -75,7 +84,8 @@ Secrets are set with `npx wrangler secret put NAME` and never stored in the repo
 | `/` | Open the assistant |
 | `⌘Z` / `⇧⌘Z` | Undo / redo the last change |
 | `⌘B` | Hide or show the sidebar |
-| `Esc` | Close a card |
+| `Esc` | Close a card, or finish editing the Command page |
+| `←` `→` | While editing the Command page: move the focused widget (`Delete` removes it) |
 
 On iPhone: open the site in Safari → Share → **Add to Home Screen**.
 
@@ -87,9 +97,28 @@ Set an OpenAI key (a [project key](https://platform.openai.com/api-keys) with a 
 npx wrangler secret put OPENAI_API_KEY
 ```
 
-It uses the OpenAI Responses API with about two dozen tools over your data (tasks, calendar, habits, wake-up times, job
-links, wishlist, garage). Conversation history stays in your browser tab. Its personality is a dry-witted English
+It uses the OpenAI Responses API with about two dozen tools over your data (projects, tasks, calendar, habits, wake-up times,
+wishlist, garage). Conversation history stays in your browser tab. Its personality is a dry-witted English
 butler; the name and how it addresses you come from your settings.
+
+## Alfred command API
+
+`POST /api/ingest/alfred` accepts questions and commands with the same tools as the in-site chat,
+including adding, renaming, deleting (archiving), and restoring projects. Authenticate with the existing
+`INGEST_TOKEN`. Send plain text or JSON `{"text":"..."}` (`message` also works).
+Each request is independent; include enough context to identify the item. Alfred can ask for clarification
+when a request is ambiguous. Questions, unsupported commands, and errors are never saved as inbox tasks.
+
+```bash
+curl -X POST "https://YOUR_SITE/api/ingest/alfred?format=text" \
+  -H "Authorization: Bearer $INGEST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Rename my Robotics project to Senior Design"}'
+```
+
+Without `?format=text`, responses contain `{handled_by, reply, actions, changed}` (or `error` on failure).
+This endpoint requires `OPENAI_API_KEY`; if unavailable it returns an error instead of adding a task.
+The to-do API below keeps its existing inbox fallback.
 
 ## To-do API
 
@@ -114,7 +143,38 @@ curl -X POST "https://YOUR_SITE/api/ingest/todo?format=text" \
 JSON body `text` = Provided Input, URL ending in `?format=text`) → *Show Notification* with the result. Don't share
 the shortcut file; it contains your token.
 
-`POST /api/ingest/link` with `{"url": "...", "title"?}` saves a job link the same way.
+## Sessions (transcripts → your notes)
+
+Send the transcript of a work or study session. The assistant's model writes a short session note (summary, what
+changed, decisions and next steps for work; what was covered, key ideas, what's unclear and what to review for
+study), labels what kind of session it was (call, interview, meeting, lecture, coding, study, research, writing,
+planning or other), picks the note it belongs to, and the **Sessions** page shows it. A notes bridge on your computer then
+collects the ready ones and writes them into your notes app.
+
+```bash
+curl -X POST "https://YOUR_SITE/api/ingest/transcripts?source=codex" \
+  -H "Authorization: Bearer $INGEST_TOKEN" \
+  --data-binary @session.txt
+# {"id":"…","status":"new"}
+```
+
+- Body: plain text, or JSON `{"transcript": "...", "source"?, "title"?, "target"?, "kind"?: "work" | "study",
+  "started_at"?, "ended_at"?: "YYYY-MM-DDTHH:MM"}`. In plain-text mode the same fields work as URL parameters.
+  Up to 1.5 MB per transcript. You can also paste one on the Sessions page.
+- It's summarized right away when it can be; anything still waiting is picked up by the bridge, the optional
+  cron in `wrangler.example.jsonc`, or **Retry** on the Sessions page. Needs `OPENAI_API_KEY`.
+- The model never copies passwords, keys or tokens into the summary. The full transcript is always kept and
+  handed to the bridge along with the summary.
+
+**Bridge API** (same `INGEST_TOKEN`):
+
+| Request | Does |
+| --- | --- |
+| `PUT /api/ingest/transcripts/targets` | `{"targets": [{"name", "kind"?, "hint"?}], "rules"?: "..."}`: the notes a session can belong to, and extra rules for the model |
+| `GET /api/ingest/transcripts?status=ready` | Summaries waiting to be saved (`status` takes a comma list: new, summarizing, ready, filed, error, dismissed) |
+| `GET /api/ingest/transcripts/:id` | One session with its transcript |
+| `POST /api/ingest/transcripts/:id/summarize` | Summarize one that is waiting, and return it |
+| `POST /api/ingest/transcripts/:id/filed` | `{"path"?}`: it was saved to your notes |
 
 ## Google Calendar (two-way)
 
@@ -142,7 +202,7 @@ edited one occurrence at a time.
 
 ## Import from Notion (optional)
 
-`scripts/import-notion.mjs` pulls tasks, projects, an inbox, job links, a garage and a wishlist from Notion
+`scripts/import-notion.mjs` pulls tasks, projects, an inbox, a garage and a wishlist from Notion
 databases. Copy `scripts/notion.config.example.json` to `scripts/notion.config.json`, fill in your data source ids,
 and check the property names at the top of each section match yours. Then:
 

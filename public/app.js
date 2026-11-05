@@ -88,34 +88,17 @@ function when(t) {
 const greeting = (hm) => { const h = +hm.slice(0, 2); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 
 // ---------- shared state ----------
-const state = { dash: null, weekStart: null, linkFilter: 'open', wishFilter: 'Searching' };
+const state = { dash: null, weekStart: null, wishFilter: 'Searching' };
 async function refreshDash() {
   state.dash = await api('/api/dashboard');
   const k = state.dash.kpis;
   const set = (key, v) => $$(`[data-count="${key}"]`).forEach((el) => { el.textContent = v ? (el.classList.contains('tab-badge') && v > 99 ? '99+' : String(v)) : ''; });
-  set('due', k.due); set('inbox', k.inbox); set('links', state.dash.counts.links_open);
+  set('due', k.due); set('inbox', k.inbox);
   return state.dash;
 }
 
 // ---------- components ----------
 const EV_COLORS = { gym: '#15803D', work: '#475569', cap: '#4F46E5', ai: '#7C3AED', rel: '#0F766E', oop: '#0369A1', ml: '#9D174D', eh: '#B45309', per: '#BE123C', cal: '#2563EB' };
-
-function kpisHtml(d) {
-  const k = d.kpis;
-  const doneHabits = d.habits.filter((h) => h.done).length;
-  const pct = d.habits.length ? Math.round((doneHabits / d.habits.length) * 100) : 0;
-  return `<section class="kpis" aria-label="Summary">
-    <div class="card kpi"><div class="label"><span>Overdue</span>${k.overdueDelta > 0 ? `<span class="badge red">+${k.overdueDelta} vs yesterday</span>` : ''}</div>
-      <div class="num${k.overdue ? ' red' : ''}">${k.overdue}</div>
-      <div class="cap">${d.oldestOverdue ? `Oldest: ${esc(d.oldestOverdue.title)}, ${d.oldestOverdue.days}d` : 'Nothing overdue'}</div></div>
-    <div class="card kpi"><div class="label"><span>Due today</span></div><div class="num">${k.today}</div>
-      <div class="cap">${k.today ? 'Clear these before tonight' : 'Nothing has a deadline today'}</div></div>
-    <div class="card kpi"><div class="label"><span>Next 7 days</span></div><div class="num">${k.soon}</div>
-      <div class="cap">${d.nextSoon ? `First: ${esc(d.nextSoon.title)} · ${fmtDay(d.nextSoon.due_at.slice(0, 10), { weekday: 'short', month: 'short', day: 'numeric' })}` : 'Clear week'}</div></div>
-    <div class="card kpi"><div class="label"><span>Daily habits</span></div><div class="num">${doneHabits}<span class="muted" style="font-size:20px">/${d.habits.length}</span></div>
-      <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Habits done today"><span style="width:${pct}%"></span></div></div>
-  </section>`;
-}
 
 // Short zone name for the week view's corner, e.g. "EST" / "EDT" for America/New_York.
 function tzLabel(day) {
@@ -272,24 +255,123 @@ function weeklyChip(h) {
   return `<label class="chip${h.done ? ' on' : ''}"><input type="checkbox" class="check" style="width:15px;height:15px" data-action="habit" data-weekly="1" data-id="${esc(h.id)}"${h.done ? ' checked' : ''}><span>${esc(h.name)}</span>${meta ? `<span class="chip-meta">${esc(meta)}</span>` : ''}</label>`;
 }
 
-// ---------- views ----------
-async function viewCommand(view) {
-  const d = await refreshDash();
+// ---------- home widgets ----------
+// The home page is a grid of widgets the owner can rearrange, resize, add and remove (Edit, or hold one on a phone).
+// Layout = [{ id, size }] in screen order, saved on the server (meta 'home:layout'). The same widget may appear twice.
+const SIZE_NAMES = { s: 'Small', m: 'Medium', l: 'Large' };
+function countWidget(size, o) {
+  const num = `<div class="num${o.red && o.n ? ' red' : ''}">${o.n}</div>`;
+  if (size === 's') return `<a class="card kpi wg-link" href="${o.href}"><div class="label"><span>${o.label}</span>${o.badge || ''}</div>${num}<div class="cap">${o.cap}</div></a>`;
+  const rows = o.list.slice(0, size === 'm' ? 3 : 8);
+  return `<section class="card"><div class="card-head"><h2>${o.label}${o.badge || ''}</h2><a href="${o.href}">${o.n > rows.length ? `All ${o.n}` : 'Deadlines'}</a></div>
+    <div class="wg-split">${num}<div class="wg-list">${rows.length ? rows.map(taskRow).join('') : `<div class="empty">${o.empty}</div>`}</div></div></section>`;
+}
+// Date widget: weekday in red over a big day number; medium and large add the month with today circled.
+function dateWidget(day, size) {
+  const label = fmtDay(day, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const big = `<div class="dw-day"><div class="dw-dow">${esc(fmtDay(day, { weekday: size === 's' ? 'long' : 'short' }))}</div><div class="dw-num">${parseDay(day).getUTCDate()}</div>${size === 's' ? `<div class="dw-mon">${esc(fmtDay(day, { month: 'long' }))}</div>` : ''}</div>`;
+  if (size === 's') return `<section class="card dw dw-s" role="img" aria-label="${esc(label)}">${big}</section>`;
+  const first = day.slice(0, 8) + '01', start = addDays(first, -parseDay(first).getUTCDay()), cells = [];
+  for (let i = 0; i < 42; i++) {
+    const c = addDays(start, i);
+    if (i % 7 === 0 && i && c.slice(5, 7) !== day.slice(5, 7)) break; // stop after the week the month ends in
+    cells.push(c.slice(5, 7) === day.slice(5, 7) ? `<span${c === day ? ' class="today"' : ''}>${+c.slice(8)}</span>` : '<span></span>');
+  }
+  return `<section class="card dw dw-${size}" role="img" aria-label="${esc(label)}">${big}
+    <div class="dw-cal" aria-hidden="true"><div class="dw-cal-head">${esc(fmtDay(day, { month: 'long' }))}</div>
+      <div class="dw-grid">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w) => `<b>${w}</b>`).join('')}${cells.join('')}</div></div></section>`;
+}
+const WIDGETS = {
+  overdue: { name: 'Overdue', desc: 'Tasks past their due date', sizes: 'sml', html: (d, size) => countWidget(size, {
+    label: 'Overdue', n: d.kpis.overdue, red: true, href: '#/deadlines', list: d.due.overdue, empty: 'Nothing overdue',
+    badge: d.kpis.overdueDelta > 0 ? ` <span class="badge red">+${d.kpis.overdueDelta} vs yesterday</span>` : '',
+    cap: d.oldestOverdue ? `Oldest: ${esc(d.oldestOverdue.title)}, ${d.oldestOverdue.days}d` : 'Nothing overdue' }) },
+  today: { name: 'Due today', desc: 'Deadlines due today', sizes: 'sml', html: (d, size) => countWidget(size, {
+    label: 'Due today', n: d.kpis.today, href: '#/deadlines', list: d.due.today, empty: 'Nothing has a deadline today',
+    cap: d.kpis.today ? 'Clear these before tonight' : 'Nothing has a deadline today' }) },
+  soon: { name: 'Next 7 days', desc: 'Due later this week', sizes: 'sml', html: (d, size) => countWidget(size, {
+    label: 'Next 7 days', n: d.kpis.soon, href: '#/deadlines', list: d.due.soon, empty: 'Clear week',
+    cap: d.nextSoon ? `First: ${esc(d.nextSoon.title)} · ${fmtDay(d.nextSoon.due_at.slice(0, 10), { weekday: 'short', month: 'short', day: 'numeric' })}` : 'Clear week' }) },
+  habits: { name: 'Daily', desc: 'Habits done today', sizes: 'sml', html: (d, size) => {
+    if (size !== 's') return habitsHtml(d.habits, 'Daily', d.weekly);
+    const done = d.habits.filter((h) => h.done).length, pct = d.habits.length ? Math.round((done / d.habits.length) * 100) : 0;
+    return `<a class="card kpi wg-link" href="#/daily"><div class="label"><span>Daily habits</span></div><div class="num">${done}<span class="muted" style="font-size:20px">/${d.habits.length}</span></div>
+      <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Habits done today"><span style="width:${pct}%"></span></div></a>`;
+  } },
+  calendar: { name: 'Calendar', desc: 'Small: next events. Medium: today. Large: the full week.', sizes: 'sml', html: (d, size, firstWeek) => {
+    if (size !== 'l') return `<section class="card cal-w cal-${size}" data-agenda="${size}" aria-label="Calendar"><div class="cal-none">Loading…</div></section>`;
+    return firstWeek ? '<section class="card week" id="week" aria-label="Week view"><div class="empty" style="margin:0 20px 16px">Loading week…</div></section>'
+      : '<section class="card"><div class="empty">The week view is already on this page.</div></section>';
+  } },
+  date: { name: 'Date', desc: 'Today’s date, like the iPhone’s. Medium and Large add the month.', sizes: 'sml', html: (d, size) => dateWidget(d.now.date, size) },
+  projects: { name: 'Projects', desc: 'Progress of open projects', sizes: 'ml', html: (d) => projectsHtml(d.projects, 'Projects') },
+  focus: { name: 'Focus', desc: 'What to do next', sizes: 'ml', html: (d, size) => {
+    const list = size === 'l' ? [...d.due.today, ...d.due.overdue.slice().reverse(), ...d.due.soon].slice(0, 8) : d.focus;
+    return `<section class="card"><div class="card-head"><h2>Focus</h2><a href="#/deadlines">All ${d.kpis.due} due</a></div>
+      ${list.length ? list.map(taskRow).join('') : '<div class="empty">You are clear. Nice.</div>'}</section>`;
+  } },
+  garage: { name: 'Garage & more', desc: 'Vehicles, wishlist and inbox', sizes: 'sm', html: (d) => `<section class="card"><div class="card-head"><h2>Garage &amp; more</h2></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${d.vehicles.map((v) => `<a class="car" href="#/garage"><strong style="font-size:22px">${esc(v.name)}</strong><span class="meta muted" style="display:block;font-size:12px">${v.mileage ? v.mileage.toLocaleString() + ' mi' : 'Service log'}</span></a>`).join('')}</div>
+    <div style="display:flex;gap:16px;margin-top:12px;font-size:13px;flex-wrap:wrap"><a href="#/wishlist">${d.counts.wishlist_open} on wishlist</a><a href="#/inbox">${d.kpis.inbox} in inbox</a></div></section>` },
+};
+const DEFAULT_HOME = [['overdue', 's'], ['today', 's'], ['soon', 's'], ['habits', 's'], ['calendar', 'l'], ['projects', 'l'], ['focus', 'm'], ['habits', 'm'], ['garage', 'm']].map(([id, size]) => ({ id, size }));
+const fitLayout = (l) => (l || DEFAULT_HOME).filter((w) => WIDGETS[w.id]).map((w) => ({ id: w.id, size: WIDGETS[w.id].sizes.includes(w.size) ? w.size : WIDGETS[w.id].sizes[0] }));
+
+// Small and medium calendar widgets: the rest of today (or tomorrow once today is over), like the iPhone's.
+const agendaRow = (e) => `<div class="ag-row" style="--c:${esc(e.color?.startsWith('#') ? e.color : 'var(--accent)')}"><span class="ag-title">${esc(e.title)}</span>
+  <span class="ag-time">${esc(e.allDay ? 'All day' : fmtRange(e.start, e.end?.slice(0, 10) === e.start.slice(0, 10) ? e.end : null))}</span></div>`;
+function fillAgenda() {
+  const d = state.dash, a = state.agenda;
+  if (!d || !a) return;
+  const today = d.now.date, nowWall = `${today}T${d.now.time}`;
+  const on = (day) => a.events.filter((e) => (e.allDay ? e.start === day : e.start.slice(0, 10) === day)).sort((x, y) => (y.allDay - x.allDay) || x.start.localeCompare(y.start));
+  const left = on(today).filter((e) => e.allDay || (e.end || e.start) > nowWall), next = on(addDays(today, 1));
+  const date = `<div class="cal-dow">${esc(fmtDay(today, { weekday: 'long' }))}</div><div class="cal-num">${parseDay(today).getUTCDate()}</div>`;
+  const rest = (n) => (left.length ? left.slice(0, n).map(agendaRow).join('')
+    : `<div class="cal-none">No more events today</div>${next.length ? `<div class="cal-sub">Tomorrow</div>${next.slice(0, Math.max(1, n - 1)).map(agendaRow).join('')}` : ''}`);
+  $$('[data-agenda]').forEach((el) => {
+    el.innerHTML = el.dataset.agenda === 's' ? `<div>${date}</div>${rest(2)}` : `<div class="cal-date">${date}</div><div class="cal-list">${rest(4)}</div>`;
+  });
+}
+async function loadAgenda() {
+  if (!$('[data-agenda]') || !state.dash) return;
+  try { state.agenda = await api(`/api/events?start=${state.dash.now.date}&days=2${Date.now() < (state.calDirty || 0) ? '&fresh=1' : ''}`); }
+  catch { $$('[data-agenda]').forEach((el) => { el.innerHTML = '<div class="cal-none">Calendar unavailable</div>'; }); return; }
+  $('#quick').dataset.google = state.agenda.google?.connected ? '1' : '';
+  fillAgenda();
+}
+
+function drawHome(view = $('#view'), fetchMissing = true) {
+  const d = state.dash, editing = !!state.homeEdit;
+  let weekShown = false;
+  const tiles = state.layout.map((w, i) => {
+    const def = WIDGETS[w.id];
+    const firstWeek = w.id === 'calendar' && w.size === 'l' && !weekShown && (weekShown = true);
+    const sizes = editing && def.sizes.length > 1 ? `<div class="wg-sizes" role="group" aria-label="${esc(def.name)} size">${[...def.sizes].map((s) =>
+      `<button type="button" data-home="size" data-size="${s}" aria-pressed="${s === w.size}" title="${SIZE_NAMES[s]}">${s.toUpperCase()}</button>`).join('')}</div>` : '';
+    return `<div class="wg wg-${w.size}" data-i="${i}"${editing ? ` tabindex="0" role="group" aria-roledescription="widget" aria-label="${esc(def.name)}, ${SIZE_NAMES[w.size]}. Arrow keys move it, Delete removes it."` : ''}>
+      <div class="wg-j"><div class="wg-body"${editing ? ' inert' : ''}>${def.html(d, w.size, firstWeek)}</div>
+      ${editing ? `<button type="button" class="wg-x" data-home="remove" aria-label="Remove ${esc(def.name)}">−</button>${sizes}` : ''}</div></div>`;
+  }).join('');
   view.innerHTML = `
     <header class="head"><div><h1>${greeting(d.now.time)}${CFG.owner ? `, ${esc(CFG.owner)}` : ''}</h1><div class="sub">${fmtDay(d.now.date, { weekday: 'long', month: 'long', day: 'numeric' })}</div></div>
-      <div class="actions"><button class="btn primary" data-action="new">New</button></div></header>
-    ${kpisHtml(d)}
-    <section class="card week" id="week" aria-label="Week view"><div class="empty" style="margin:0 20px 16px">Loading week…</div></section>
-    ${projectsHtml(d.projects, 'Projects')}
-    <div class="grid-auto">
-      <section class="card"><div class="card-head"><h2>Focus</h2><a href="#/deadlines">All ${d.kpis.due} due</a></div>
-        ${d.focus.length ? d.focus.map(taskRow).join('') : '<div class="empty">You are clear. Nice.</div>'}</section>
-      ${habitsHtml(d.habits, 'Daily', d.weekly)}
-      <section class="card"><div class="card-head"><h2>Garage &amp; more</h2></div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">${d.vehicles.map((v) => `<a class="car" href="#/garage"><strong style="font-size:22px">${esc(v.name)}</strong><span class="meta muted" style="display:block;font-size:12px">${v.mileage ? v.mileage.toLocaleString() + ' mi' : 'Service log'}</span></a>`).join('')}</div>
-        <div style="display:flex;gap:16px;margin-top:12px;font-size:13px;flex-wrap:wrap"><a href="#/jobs">${d.counts.links_open} job links to apply</a><a href="#/wishlist">${d.counts.wishlist_open} on wishlist</a><a href="#/inbox">${d.kpis.inbox} in inbox</a></div></section>
-    </div>`;
-  await loadWeek(state.weekStart);
+      ${editing ? '' : '<div class="actions"><button class="btn primary" data-action="new">New</button></div>'}</header>
+    <div class="home-grid${editing ? ' editing' : ''}" id="home">${tiles || '<div class="empty wg-empty">No widgets here. Choose Edit, then Add widget.</div>'}</div>`;
+  if ($('#wg-bar').hidden === editing) $('#wg-bar').hidden = !editing; // only on change, so it pops in once
+  fillWeek(); fillAgenda();
+  // A calendar widget just added in edit mode has nothing cached to draw yet.
+  if (!fetchMissing) return;
+  if ($('#week') && !state.week) loadWeek(state.weekStart).catch((e) => toast(e.message));
+  if ($('[data-agenda]') && !state.agenda) loadAgenda();
+}
+
+// ---------- views ----------
+async function viewCommand(view) {
+  await state.layoutSave; // a layout change still being saved would otherwise come back as the old one
+  const d = await refreshDash();
+  state.layout = fitLayout(d.layout);
+  drawHome(view, false);
+  await Promise.all([loadWeek(state.weekStart), loadAgenda()]);
 }
 function calendarControls(w) {
   const g = w.google || {};
@@ -324,7 +406,12 @@ async function loadWeek(start) {
   state.weekStart = w.start;
   state.google = w.google;
   $('#quick').dataset.google = w.google?.connected ? '1' : '';
-  box.innerHTML = weekHtml(w);
+  fillWeek();
+}
+function fillWeek() {
+  const box = $('#week');
+  if (!box || !state.week) return;
+  box.innerHTML = weekHtml(state.week);
   if (isPhone()) {
     const sx = $('.week-scroll-x', box), day = $('.wk-head .wk-day.today', box);
     sx.scrollLeft = day ? day.getBoundingClientRect().left - sx.getBoundingClientRect().left - $('.wk-gutter', box).offsetWidth : 0;
@@ -360,7 +447,14 @@ async function viewInbox(view) {
 }
 async function viewProjects(view) {
   const { projects } = await api('/api/projects');
-  view.innerHTML = `<header class="head"><div><h1>Projects</h1><div class="sub">${projects.length} projects</div></div></header>${projectsHtml(projects, 'All projects', true)}`;
+  const editing = !!state.projectEdit;
+  view.innerHTML = `<header class="head"><div><h1>Projects</h1><div class="sub">${projects.length} projects</div></div>
+    <button type="button" class="btn small" data-action="projects-edit" aria-pressed="${editing}">${editing ? 'Done' : 'Edit'}</button></header>
+    ${editing ? `<section class="card"><h2> Edit projects</h2>
+      <form class="form-row" data-form="add-project"><label class="sr" for="new-project">Project name</label><input id="new-project" class="input" name="name" maxlength="120" placeholder="New project name" required><button class="btn primary">Add project</button></form>
+      <p class="muted">Deleting hides a project and keeps its tasks. Use Undo to restore it.</p>
+      ${projects.map((p) => `<div class="row"><span class="grow">${esc(p.name)}</span><button type="button" class="btn small" data-action="project-delete" data-id="${esc(p.id)}" data-name="${esc(p.name)}" aria-label="Delete ${esc(p.name)}">Delete</button></div>`).join('')}
+    </section>` : ''}${projectsHtml(projects, 'All projects', true)}`;
 }
 async function viewProject(view, id) {
   const { project: p, tasks, done } = await api('/api/projects/' + encodeURIComponent(id));
@@ -405,24 +499,7 @@ async function viewDaily(view) {
       <div class="table-wrap"><div class="heat heat-wk">${weeklies.map((x) => `${name(x)}${weeks.map((ws) => { const on = doneIn(x, ws); return `<span class="cell${on.length ? ' on' : ''}" title="${esc(x.name)} · week of ${short(ws)}${on.length ? ` · done ${fmtDay(on[on.length - 1], { weekday: 'short', month: 'short', day: 'numeric' })}` : ''}"></span>`; }).join('')}${acts(x, 'daily')}`).join('')}</div></div></section>` : ''}
   </div>`;
 }
-async function viewJobs(view) {
-  const { links } = await api('/api/links');
-  const f = state.linkFilter;
-  const shown = links.filter((l) => (f === 'open' ? !l.done : f === 'manual' ? l.needs_manual : true));
-  view.innerHTML = `
-    <header class="head"><div><h1>Job Apps &amp; More</h1><div class="sub">${links.filter((l) => !l.done).length} to apply · ${links.length} saved</div></div></header>
-    <section class="card"><form class="form-row" data-form="add-link"><label class="sr" for="nl-url">Job URL</label><input id="nl-url" class="input" name="url" placeholder="Paste a job link…" required>
-      <label class="sr" for="nl-title">Name (optional)</label><input id="nl-title" class="input" name="title" placeholder="Name (optional, fetched from the page)"><button class="btn primary">Save link</button></form></section>
-    <section class="card">
-      <div class="chips" role="group" aria-label="Filter" style="margin-bottom:10px">${[['open', 'To apply'], ['manual', 'Needs manual'], ['all', 'All']].map(([k, l]) => `<button class="chip${f === k ? ' on' : ''}" data-action="link-filter" data-filter="${k}" aria-pressed="${f === k}">${l}</button>`).join('')}</div>
-      ${shown.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Added</th><th>Done</th><th>Needs manual</th></tr></thead><tbody>${shown.map((l) => `<tr>
-        <td><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a></td>
-        <td style="white-space:nowrap" class="muted">${esc(fmtDay(l.added_on, { month: 'short', day: 'numeric' }))}</td>
-        <td><input type="checkbox" class="check" data-action="link-done" data-id="${esc(l.id)}"${l.done ? ' checked' : ''} aria-label="Applied"></td>
-        <td><input type="checkbox" class="check" data-action="link-manual" data-id="${esc(l.id)}"${l.needs_manual ? ' checked' : ''} aria-label="Needs manual"></td></tr>`).join('')}</tbody></table></div>`
-        : `<div class="empty">${links.length ? 'Nothing in this filter.' : 'No job links here yet. Your saved links from Notion come over with the Notion import, and new ones you save here (or through your webhook server) land here.'}</div>`}
-    </section>`;
-}
+
 async function viewGarage(view) {
   const { vehicles, logs } = await api('/api/garage');
   view.innerHTML = `
@@ -469,17 +546,86 @@ async function viewSpending(view) {
     <section class="card"><h2>Not moved over yet</h2><p class="muted" style="margin:8px 0 0">Your Monthly Budget, Budget &amp; Finance Tracker and Monthly Purchase Planner are still in Notion. They will come over in the next step of the import, once I know which of them you still use.</p></section>`;
 }
 
+// ---------- sessions (transcripts summarized into your notes) ----------
+const TS_STATUS = { new: ['Waiting', ''], summarizing: ['Summarizing…', ''], ready: ['Ready for notes', 'amber'], filed: ['In notes', 'green'], error: ['Problem', 'red'], dismissed: ['Dismissed', ''] };
+const TS_FILTERS = [['all', 'All', 'new,summarizing,ready,filed,error'], ['waiting', 'Not in notes yet', 'new,summarizing,ready'], ['filed', 'In notes', 'filed'], ['problems', 'Problems', 'error'], ['dismissed', 'Dismissed', 'dismissed']];
+const fmtWall = (w) => (w ? `${fmtDay(w.slice(0, 10), { month: 'short', day: 'numeric' })} · ${fmtTime(w.slice(11, 16))}` : '');
+const tsBadge = (t) => { const [label, cls] = TS_STATUS[t.status] || [t.status, '']; return `<span class="badge ${cls}">${esc(label)}</span>`; };
+const tsTitle = (t) => t.title || t.hint_title || (t.status === 'error' ? 'Could not summarize' : 'Summarizing…');
+// Re-check while something is still being summarized.
+function tsPoll(pending) {
+  clearTimeout(state.tsPoll);
+  if (pending) state.tsPoll = setTimeout(() => { if (location.hash.startsWith('#/sessions')) render(); }, 5000);
+}
+function tsTargetSelect(t, targets, id) {
+  return `<label class="sr" for="${id}">Note</label><select id="${id}" class="input" data-action="ts-target" data-id="${esc(t.id)}" data-prev="${esc(t.target || '')}" style="flex:0 1 260px">
+    <option value="">No note (daily note only)</option>${targets.map((x) => `<option value="${esc(x.name)}"${x.name === t.target ? ' selected' : ''}>${esc(x.name)}${x.kind ? ` · ${esc(x.kind)}` : ''}</option>`).join('')}</select>`;
+}
+function tsActions(t) {
+  return [
+    t.status === 'error' ? `<button class="btn small" data-action="ts-retry" data-id="${esc(t.id)}">Retry</button>` : '',
+    t.status === 'dismissed' ? `<button class="btn small" data-action="ts-restore" data-id="${esc(t.id)}" data-name="${esc(tsTitle(t))}">Restore</button>`
+      : `<button class="btn small" data-action="ts-dismiss" data-id="${esc(t.id)}" data-name="${esc(tsTitle(t))}">Dismiss</button>`,
+  ].join('');
+}
+async function viewSessions(view) {
+  const f = TS_FILTERS.find((x) => x[0] === state.tsFilter) || TS_FILTERS[0];
+  const { transcripts, counts, targets, targets_updated } = await api('/api/transcripts?status=' + f[2]);
+  const n = (statuses) => statuses.split(',').reduce((a, s) => a + (counts[s] || 0), 0);
+  view.innerHTML = `
+    <header class="head"><div><h1>Sessions</h1><div class="sub">Transcripts of work and study sessions, summarized and sent to your notes</div></div></header>
+    <section class="card"><details${n('new,summarizing,ready,filed,error,dismissed') ? '' : ' open'}><summary class="card-head" style="cursor:pointer;margin:0"><h2>Add a transcript</h2></summary>
+      <form data-form="add-transcript"><label class="sr" for="ts-text">Transcript</label>
+        <textarea id="ts-text" class="input ts-text" name="transcript" placeholder="Paste a chat or session transcript…" required></textarea>
+        <div class="form-row"><label class="sr" for="ts-title">Title</label><input id="ts-title" class="input" name="title" maxlength="120" placeholder="Title (optional)">
+          <label class="sr" for="ts-target">Note</label><select id="ts-target" class="input" name="target" style="flex:0 1 260px"><option value="">Let ${esc(CFG.assistant)} pick the note</option>${targets.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join('')}</select>
+          <button class="btn primary">Send</button></div></form>
+      ${targets.length ? '' : '<p class="muted" style="margin:10px 0 0">No notes to sort into yet. They show up once your notes bridge sends its list.</p>'}</details></section>
+    <section class="card">
+      <div class="chips" role="group" aria-label="Filter" style="margin-bottom:10px">${TS_FILTERS.map(([k, label, st]) => `<button class="chip${f[0] === k ? ' on' : ''}" data-action="ts-filter" data-filter="${k}" aria-pressed="${f[0] === k}">${label}${n(st) ? `<span class="chip-meta">${n(st)}</span>` : ''}</button>`).join('')}</div>
+      ${transcripts.length ? transcripts.map((t) => `<div class="row">
+        <span class="grow"><a href="#/sessions/${esc(t.id)}">${esc(tsTitle(t))}</a><span class="meta">${[t.target, t.summary?.category || t.kind, t.source, fmtWall(t.received_on)].filter(Boolean).map(esc).join(' · ')}</span></span>
+        ${tsBadge(t)}${tsActions(t)}</div>`).join('') : `<div class="empty">${n('new,summarizing,ready,filed,error,dismissed') ? 'Nothing in this filter.' : 'No sessions yet. Paste a transcript above, or send one to /api/ingest/transcripts.'}</div>`}
+      ${targets_updated ? `<p class="muted" style="margin:10px 0 0;font-size:12px">Notes list from your bridge, updated ${esc(new Date(targets_updated).toLocaleString('en-US', { timeZone: CFG.tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}</p>` : ''}
+    </section>`;
+  tsPoll(transcripts.some((t) => t.status === 'new' || t.status === 'summarizing'));
+}
+async function viewSession(view, id) {
+  const t = await api('/api/transcripts/' + encodeURIComponent(id));
+  const s = t.summary || {};
+  const list = (title, items) => (items?.length ? `<div class="group-title"><span>${title}</span></div><ul class="ts-list">${items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '');
+  const shown = (t.transcript || '').slice(0, 200000);
+  view.innerHTML = `
+    <header class="head"><div><div class="sub"><a href="#/sessions">Sessions</a> /</div><h1>${esc(tsTitle(t))}</h1></div>${tsBadge(t)}</header>
+    <section class="card">
+      <div class="ts-meta muted">${[s.category, s.kind || t.kind, t.source, fmtWall(t.received_on), `${(t.chars || 0).toLocaleString()} characters`].filter(Boolean).map(esc).join(' · ')}</div>
+      ${t.status === 'ready' ? `<div class="form-row" style="margin-bottom:6px">${tsTargetSelect(t, t.targets || [], 'ts-move')}</div>` : t.target ? `<p style="margin:0 0 6px">Note: <strong>${esc(t.target)}</strong></p>` : ''}
+      ${t.filed_path ? `<p class="muted" style="margin:0 0 6px">Saved to ${esc(t.filed_path)}${fmtWall(t.filed_at) ? ` · ${esc(fmtWall(t.filed_at))}` : ''}</p>` : ''}
+      ${t.error ? `<p class="ts-error">${esc(t.error)}</p>` : ''}
+      ${s.summary ? `<p class="ts-summary">${esc(s.summary)}</p>` : t.status === 'new' || t.status === 'summarizing' ? '<p class="muted">Summarizing…</p>' : ''}
+      ${list('What changed', s.changed)}${list('Decisions', s.decisions)}${list('Next steps', s.next)}
+      ${list('What I covered', s.covered)}${list('Key ideas', s.key_ideas)}${list('Still unclear', s.unclear)}${list('Review next', s.review)}
+      ${list('Concepts', s.concepts)}${list('Links', s.links)}
+      <div class="ts-actions">${tsActions(t)}${t.status === 'ready' ? `<button class="btn small" data-action="ts-again" data-id="${esc(t.id)}">Summarize again</button>` : ''}</div>
+    </section>
+    <section class="card"><details><summary class="card-head" style="cursor:pointer;margin:0"><h2>Transcript</h2></summary>
+      ${t.transcript ? `<pre class="ts-pre">${esc(shown)}${t.transcript.length > shown.length ? '\n\n[…]' : ''}</pre>` : '<p class="muted">Removed after it was saved to your notes.</p>'}</details></section>`;
+  tsPoll(t.status === 'new' || t.status === 'summarizing');
+}
+
 // ---------- router ----------
-const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, jobs: viewJobs, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending };
+const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, sessions: viewSessions, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending };
 async function render() {
   const [, page = '', arg] = location.hash.replace(/^#/, '').split('/');
   $$('.nav a, .tabbar a, .more-panel a').forEach((a) => { const p = a.getAttribute('href').replace(/^#\//, ''); if (p === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
-  $('#tab-more').classList.toggle('on', ['projects', 'jobs', 'garage', 'wishlist', 'spending'].includes(page));
+  $('#tab-more').classList.toggle('on', ['projects', 'sessions', 'garage', 'wishlist', 'spending'].includes(page));
   showMore(false);
+  if (page) { state.homeEdit = false; $('#wg-bar').hidden = true; }
   lastRender = Date.now();
   const view = $('#view');
   try {
     if (page === 'projects' && arg) await viewProject(view, decodeURIComponent(arg));
+    else if (page === 'sessions' && arg) await viewSession(view, decodeURIComponent(arg));
     else await (ROUTES[page] || viewCommand)(view);
   } catch (e) {
     view.innerHTML = `<div class="card"><h2>Something went wrong</h2><p class="muted">${esc(e.message)}</p><button class="btn" data-action="reload">Try again</button></div>`;
@@ -510,13 +656,6 @@ document.addEventListener('change', async (ev) => {
       remember(`${el.checked ? 'Checked' : 'Unchecked'}: ${name}${el.dataset.weekly ? ' (this week)' : ''}`, toggle, toggle);
       refreshDash().then(() => { if (!location.hash || location.hash === '#/' || el.dataset.weekly) rerender(); });
     }
-    if (el.dataset.action === 'link-done' || el.dataset.action === 'link-manual') {
-      const field = el.dataset.action === 'link-done' ? 'done' : 'needs_manual', val = el.checked;
-      const title = el.closest('tr')?.querySelector('a')?.textContent?.trim() || 'link';
-      const set = (v) => api('/api/links/' + id, { method: 'PATCH', body: { [field]: v } });
-      await set(val);
-      remember(`${field === 'done' ? (val ? 'Applied' : 'Not applied') : (val ? 'Needs manual' : 'No manual needed')}: ${title}`, () => set(!val), () => set(val));
-    }
     if (el.dataset.action === 'cal-show') {
       await api('/api/google/calendars', { method: 'POST', body: { id: el.dataset.id, shown: el.checked } });
       await loadWeek(state.weekStart); await showCalendarPicker(true);
@@ -527,6 +666,13 @@ document.addEventListener('change', async (ev) => {
       await set(next);
       el.dataset.prev = next;
       remember(`Status: ${next}`, () => set(prev), () => set(next));
+    }
+    if (el.dataset.action === 'ts-target') {
+      const prev = el.dataset.prev, next = el.value;
+      const set = (target) => api('/api/transcripts/' + id, { method: 'PATCH', body: { target } });
+      await set(next);
+      el.dataset.prev = next;
+      remember(next ? `Will go to ${next}` : 'Will go to the daily note only', () => set(prev), () => set(next));
     }
   } catch (e) { toast(e.message); }
 });
@@ -546,6 +692,21 @@ document.addEventListener('click', async (ev) => {
     }
     if (a === 'new') openQuick();
     if (a === 'reload') render();
+    if (a === 'projects-edit') {
+      state.projectEdit = !state.projectEdit;
+      await render();
+      if (state.projectEdit && !isPhone()) $('#new-project')?.focus();
+    }
+    if (a === 'project-delete') {
+      const set = (archived) => api('/api/projects/' + el.dataset.id, { method: 'PATCH', body: { archived } });
+      el.disabled = true;
+      try {
+        await set(true);
+        remember(`Deleted ${el.dataset.name}`, () => set(false), () => set(true));
+        await refreshDash();
+        await render();
+      } finally { el.disabled = false; }
+    }
     if (a === 'habits-edit') {
       state.habitEdit = !state.habitEdit;
       el.closest('.daily-page')?.classList.toggle('editing', state.habitEdit);
@@ -571,8 +732,20 @@ document.addEventListener('click', async (ev) => {
       remember('Moved to Deadlines', () => set('inbox'), () => set('task'));
       rerender();
     }
-    if (a === 'link-filter') { state.linkFilter = el.dataset.filter; render(); }
     if (a === 'wish-filter') { state.wishFilter = el.dataset.filter; render(); }
+    if (a === 'ts-filter') { state.tsFilter = el.dataset.filter; render(); }
+    if (a === 'ts-retry' || a === 'ts-again') {
+      el.disabled = true; el.textContent = 'Summarizing…';
+      try { await api(`/api/transcripts/${el.dataset.id}/summarize`, { method: 'POST', body: { again: a === 'ts-again' } }); toast('Summarized'); }
+      finally { render(); }
+    }
+    if (a === 'ts-dismiss' || a === 'ts-restore') {
+      const set = (status) => api('/api/transcripts/' + el.dataset.id, { method: 'PATCH', body: { status } });
+      const [to, back] = a === 'ts-dismiss' ? ['dismissed', 'restore'] : ['restore', 'dismissed'];
+      await set(to);
+      remember(`${a === 'ts-dismiss' ? 'Dismissed' : 'Restored'}: ${el.dataset.name}`, () => set(back), () => set(to));
+      render();
+    }
   } catch (e) { toast(e.message); }
 });
 document.addEventListener('submit', async (ev) => {
@@ -581,9 +754,33 @@ document.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const f = Object.fromEntries(new FormData(form));
   try {
+    if (form.dataset.form === 'add-project') {
+      const button = $('button', form);
+      button.disabled = true;
+      try {
+        const p = await api('/api/projects', { method: 'POST', body: { name: f.name } });
+        const set = (archived) => api('/api/projects/' + p.id, { method: 'PATCH', body: { archived } });
+        remember(`Added ${p.name}`, () => set(true), () => set(false));
+        await refreshDash();
+        await render();
+        $('#new-project')?.focus();
+      } finally { button.disabled = false; }
+      return;
+    }
+    if (form.dataset.form === 'add-transcript') {
+      const button = $('button', form);
+      button.disabled = true;
+      try {
+        const r = await api('/api/transcripts', { method: 'POST', body: { transcript: f.transcript, title: f.title || undefined, target: f.target || undefined } });
+        const set = (status) => api('/api/transcripts/' + r.id, { method: 'PATCH', body: { status } });
+        remember('Sent. Summarizing…', () => set('dismissed'), () => set('restore'));
+        state.tsFilter = 'all';
+        await render();
+      } finally { button.disabled = false; }
+      return;
+    }
     if (form.dataset.form === 'add-task') await api('/api/tasks', { method: 'POST', body: { title: f.title, project_id: f.project_id || null, due_at: f.due || null } });
     if (form.dataset.form === 'add-inbox') await api('/api/tasks', { method: 'POST', body: { title: f.title, kind: 'inbox' } });
-    if (form.dataset.form === 'add-link') await api('/api/links', { method: 'POST', body: { url: f.url, title: f.title } });
     if (form.dataset.form === 'add-log') await api('/api/garage/logs', { method: 'POST', body: f });
     if (form.dataset.form === 'add-wish') await api('/api/wishlist', { method: 'POST', body: f });
     if (form.dataset.form === 'add-habit') {
@@ -619,7 +816,6 @@ $('#quick-form').addEventListener('submit', async (ev) => {
       if (!f.due) { toast('Pick a date for the event'); return; }
       await api('/api/calendar/events', { method: 'POST', body: { title: f.title, date: f.due, ...(f.time ? { start_time: f.time, ...(f.end ? { end_time: f.end } : {}) } : { all_day: true }) } });
     }
-    if (f.type === 'link') await api('/api/links', { method: 'POST', body: { url: f.title } });
     if (f.type === 'wish') await api('/api/wishlist', { method: 'POST', body: { name: f.title } });
     $('#quick').close();
     toast(f.type === 'event' ? 'Added to Google Calendar' : 'Added');
@@ -923,7 +1119,7 @@ const SNAP = 15;
 const minsOf = (wall) => +wall.slice(11, 13) * 60 + +wall.slice(14, 16);
 const hhmm = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 const calApi = (path, body) => { state.calDirty = Date.now() + 60e3; return api('/api/calendar/' + path, { method: 'POST', body }); };
-const reloadWeek = () => loadWeek(state.weekStart);
+const reloadWeek = () => Promise.all([loadWeek(state.weekStart), loadAgenda()]);
 const evField = (n) => $('#ev-form').elements[n];
 const colMinutes = (col, y) => (y - col.getBoundingClientRect().top) / state.week._PX * 60 + state.week._H0 * 60;
 function placeBlock(el, s, e) {
@@ -1406,23 +1602,206 @@ $('#tk-form').addEventListener('keydown', (ev) => {
 document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && tkEditing) closeTaskEditor(); });
 window.addEventListener('resize', () => { if (tkEditing) positionPop($('#tk-pop'), tkEditing.anchor); });
 
+// ---------- home screen editing (iPhone style: jiggle, drag to move, resize, add, remove) ----------
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+function saveHome(layout) {
+  state.layout = layout;
+  state.layoutSave = api('/api/home/layout', { method: 'PUT', body: { layout } }).catch((e) => toast(e.message));
+  return state.layoutSave;
+}
+function commitLayout(next, label, redraw = true) {
+  const prev = state.layout;
+  saveHome(next);
+  if (redraw && $('#home')) drawHome();
+  remember(label, () => saveHome(prev), () => saveHome(next));
+}
+function setHomeEdit(on) {
+  if (!!state.homeEdit === on || !state.layout) return;
+  state.homeEdit = on;
+  if (!on && $('#wg-gallery').open) $('#wg-gallery').close();
+  drawHome();
+  (on ? $('#wg-bar [data-home="done"]') : $('#view'))?.focus({ preventScroll: true });
+}
+function moveWidget(i, j) {
+  if (j < 0 || j >= state.layout.length || i === j) return;
+  const next = [...state.layout];
+  next.splice(j, 0, next.splice(i, 1)[0]);
+  commitLayout(next, `Moved ${WIDGETS[next[j].id].name}`);
+  $(`#home .wg[data-i="${j}"]`)?.focus();
+}
+function removeWidget(i) {
+  const w = state.layout[i];
+  commitLayout(state.layout.filter((_, k) => k !== i), `Removed ${WIDGETS[w.id].name}`);
+  ($(`#home .wg[data-i="${Math.min(i, state.layout.length - 1)}"]`) || $('[data-home="add"]'))?.focus();
+}
+function openWidgetGallery() {
+  $('#wg-gallery-list').innerHTML = Object.entries(WIDGETS).map(([id, w]) => `<div class="wg-opt"><div class="grow"><strong>${esc(w.name)}</strong><span class="muted">${esc(w.desc)}</span></div>
+    <div class="wg-opt-sizes">${[...w.sizes].map((s) => `<button type="button" class="btn small" data-home="add-one" data-id="${id}" data-size="${s}" aria-label="Add ${esc(w.name)}, ${SIZE_NAMES[s]}">${SIZE_NAMES[s]}</button>`).join('')}</div></div>`).join('');
+  $('#wg-gallery').showModal();
+}
+
+let swallowClick = false;
+document.addEventListener('click', (ev) => {
+  if (swallowClick) { swallowClick = false; ev.preventDefault(); ev.stopPropagation(); }
+}, true);
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-home]');
+  if (!b) {
+    if (ev.target.closest('[data-close-gallery]')) $('#wg-gallery').close();
+    else if (state.homeEdit && ev.target.id === 'home') setHomeEdit(false); // tap on empty space, like the iPhone
+    return;
+  }
+  const a = b.dataset.home, i = +(b.closest('.wg')?.dataset.i ?? -1);
+  if (a === 'edit') {
+    $('#settings').close();
+    if ($('#home')) setHomeEdit(true);
+    else { state.homeEdit = true; location.hash = '#/'; } // the home view draws itself in edit mode
+  }
+  if (a === 'done') setHomeEdit(false);
+  if (a === 'add') openWidgetGallery();
+  if (a === 'remove') removeWidget(i);
+  if (a === 'size' && state.layout[i].size !== b.dataset.size) {
+    const next = state.layout.map((w, k) => (k === i ? { ...w, size: b.dataset.size } : w));
+    commitLayout(next, `${WIDGETS[next[i].id].name}: ${SIZE_NAMES[b.dataset.size].toLowerCase()}`);
+    $(`#home .wg[data-i="${i}"] [data-size="${b.dataset.size}"]`)?.focus();
+  }
+  if (a === 'add-one') {
+    $('#wg-gallery').close();
+    commitLayout([{ id: b.dataset.id, size: b.dataset.size }, ...state.layout], `Added ${WIDGETS[b.dataset.id].name}`);
+    window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
+    $('#home .wg[data-i="0"]')?.focus({ preventScroll: true });
+  }
+  if (a === 'reset') { $('#wg-gallery').close(); $('#settings').close(); commitLayout(fitLayout(null), 'Reset the home screen'); }
+});
+document.addEventListener('keydown', (ev) => {
+  if (!state.homeEdit || ev.metaKey || ev.ctrlKey || ev.altKey || document.querySelector('dialog[open]')) return;
+  if (ev.key === 'Escape') { ev.preventDefault(); setHomeEdit(false); return; }
+  const wg = ev.target.classList?.contains('wg') ? ev.target : null;
+  if (!wg) return;
+  const i = +wg.dataset.i;
+  if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') { ev.preventDefault(); moveWidget(i, i - 1); }
+  if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') { ev.preventDefault(); moveWidget(i, i + 1); }
+  if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); removeWidget(i); }
+});
+
+// Dragging. Mouse: press and move. Touch: hold a moment, then drag (a quick swipe still scrolls the page).
+// Outside edit mode, holding a widget on a touch screen starts editing.
+let wgDrag = null;
+function flip(els, mutate) {
+  const before = els.map((el) => el.getBoundingClientRect());
+  els.forEach((el) => el.getAnimations().forEach((an) => an.cancel()));
+  mutate();
+  if (reducedMotion()) return;
+  els.forEach((el, k) => {
+    const a = before[k], b = el.getBoundingClientRect();
+    if (a.left !== b.left || a.top !== b.top) el.animate([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: 'none' }], { duration: 220, easing: 'cubic-bezier(.2, .8, .2, 1)' });
+  });
+}
+function placeDragged() {
+  const { wg, gx, gy, px, py } = wgDrag, g = $('#home').getBoundingClientRect();
+  wg.style.transform = `translate(${px - gx - g.left - wg.offsetLeft}px, ${py - gy - g.top - wg.offsetTop}px) scale(1.03)`;
+}
+function reorderUnder() {
+  const t = document.elementFromPoint(wgDrag.px, wgDrag.py)?.closest('#home > .wg');
+  if (!t) { wgDrag.last = null; return; }
+  if (t === wgDrag.wg || t === wgDrag.last) return;
+  wgDrag.last = t; // don't swap straight back while the pointer is still over the widget that just moved
+  const items = $$('#home > .wg'), i = items.indexOf(wgDrag.wg), j = items.indexOf(t);
+  flip(items.filter((el) => el !== wgDrag.wg), () => (i < j ? t.after(wgDrag.wg) : t.before(wgDrag.wg)));
+  placeDragged();
+}
+function dragAutoScroll() {
+  if (!wgDrag?.active) return;
+  const y = wgDrag.py, top = 80, bottom = innerHeight - (isPhone() ? 130 : 80);
+  const v = y < top ? -(top - y) / 3 : y > bottom ? (y - bottom) / 3 : 0;
+  if (v) { scrollBy(0, v); placeDragged(); reorderUnder(); }
+  requestAnimationFrame(dragAutoScroll);
+}
+function startWidgetDrag() {
+  Object.assign(wgDrag, { active: true, px: wgDrag.x0, py: wgDrag.y0 });
+  wgDrag.wg.classList.add('dragging');
+  document.body.classList.add('wg-dragging');
+  navigator.vibrate?.(8);
+  placeDragged();
+  requestAnimationFrame(dragAutoScroll);
+}
+function endWidgetDrag() {
+  if (!wgDrag) return;
+  const d = wgDrag;
+  wgDrag = null;
+  clearTimeout(d.hold);
+  if (!d.active) return;
+  swallowClick = true;
+  document.body.classList.remove('wg-dragging');
+  d.wg.classList.remove('dragging');
+  const from = d.wg.style.transform;
+  d.wg.style.transform = '';
+  if (!reducedMotion()) d.wg.animate([{ transform: from }, { transform: 'none' }], { duration: 200, easing: 'cubic-bezier(.2, .8, .2, 1)' });
+  const items = $$('#home > .wg'), order = items.map((el) => +el.dataset.i);
+  if (order.every((v, k) => v === k)) return;
+  const next = order.map((k) => state.layout[k]);
+  items.forEach((el, k) => { el.dataset.i = k; });
+  commitLayout(next, `Moved ${WIDGETS[next[+d.wg.dataset.i].id].name}`, false);
+}
+document.addEventListener('pointerdown', (ev) => {
+  swallowClick = false;
+  const wg = ev.target.closest('#home > .wg');
+  if (!wg || ev.button > 0) return;
+  const base = { wg, x0: ev.clientX, y0: ev.clientY, touch: ev.pointerType !== 'mouse' };
+  if (!state.homeEdit) {
+    if (!base.touch) return;
+    wgDrag = { ...base, pressOnly: true, hold: setTimeout(() => { wgDrag = null; swallowClick = true; navigator.vibrate?.(10); setHomeEdit(true); }, 550) };
+    return;
+  }
+  if (ev.target.closest('button')) return;
+  const r = wg.getBoundingClientRect();
+  wgDrag = { ...base, gx: ev.clientX - r.left, gy: ev.clientY - r.top, active: false };
+  if (base.touch) wgDrag.hold = setTimeout(startWidgetDrag, 170);
+});
+document.addEventListener('pointermove', (ev) => {
+  if (!wgDrag) return;
+  if (!wgDrag.active) {
+    if (Math.hypot(ev.clientX - wgDrag.x0, ev.clientY - wgDrag.y0) < (wgDrag.touch ? 8 : 4)) return;
+    if (wgDrag.touch) { clearTimeout(wgDrag.hold); wgDrag = null; return; } // moved before the hold finished: it's a scroll
+    startWidgetDrag();
+  }
+  wgDrag.px = ev.clientX; wgDrag.py = ev.clientY;
+  placeDragged(); reorderUnder();
+});
+document.addEventListener('pointerup', endWidgetDrag);
+document.addEventListener('pointercancel', endWidgetDrag);
+// Once a touch drag has started, keep the page from scrolling under the finger.
+document.addEventListener('touchmove', (ev) => { if (wgDrag?.active) ev.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', (ev) => { if (ev.target.closest('#home > .wg') && (wgDrag || state.homeEdit)) ev.preventDefault(); });
+
 // ---------- theme ----------
 const THEMES = ['auto', 'light', 'dark'];
 function applyTheme(t) {
   if (t === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
-  $('#theme-btn').textContent = 'Theme: ' + t;
-  $('#theme-btn-m').textContent = 'Theme: ' + t;
+  $$('[data-theme-pick]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.themePick === t)));
 }
 let theme = 'auto';
 try { theme = localStorage.getItem('batcave-theme') || 'auto'; } catch { /* storage unavailable */ }
 applyTheme(theme);
-const cycleTheme = () => {
-  theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
-  applyTheme(theme);
-  try { localStorage.setItem('batcave-theme', theme); } catch { /* ignore */ }
-};
-$('#theme-btn').addEventListener('click', cycleTheme);
-$('#theme-btn-m').addEventListener('click', cycleTheme);
+
+// ---------- settings (bottom-left, or More on a phone) ----------
+function openSettings() {
+  showMore(false);
+  $('#set-sidebar').checked = !sidebarHidden();
+  $('#settings').showModal();
+}
+$('#settings-btn').addEventListener('click', openSettings);
+$('#settings-btn-m').addEventListener('click', openSettings);
+$('#settings').addEventListener('click', (ev) => {
+  const pick = ev.target.closest('[data-theme-pick]');
+  if (pick && THEMES.includes(pick.dataset.themePick)) {
+    theme = pick.dataset.themePick;
+    applyTheme(theme);
+    try { localStorage.setItem('batcave-theme', theme); } catch { /* ignore */ }
+  }
+  if (ev.target.closest('[data-close-settings]') || ev.target === ev.currentTarget) $('#settings').close();
+});
+$('#set-sidebar').addEventListener('change', (ev) => setSidebar(!ev.target.checked));
 
 // ---------- phone: More sheet, keyboard-aware chat height, refresh when reopened ----------
 function showMore(open) {

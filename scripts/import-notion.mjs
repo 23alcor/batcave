@@ -8,7 +8,7 @@
 //      pages that hold your databases (••• menu → Connections).
 //   2. Copy scripts/notion.config.example.json to scripts/notion.config.json (git-ignored) and paste the
 //      data source id of each database you want to import. Leave out the ones you don't have.
-//   3. NOTION_TOKEN=ntn_xxx node scripts/import-notion.mjs [--only=links,tasks,...]
+//   3. NOTION_TOKEN=ntn_xxx node scripts/import-notion.mjs [--only=tasks,projects,...]
 //
 // The property names below ("Due", "Status", "Project"…) match the author's Notion setup. If yours are
 // named differently, change them in the matching section further down.
@@ -118,15 +118,6 @@ if (want('todo')) {
     n++;
   }
   report.inbox = n;
-}
-if (want('links')) {
-  const rows = await query(DS.links);
-  for (const p of rows) {
-    const u = url(p, 'URL');
-    if (!u) continue;
-    out.push(upsert('links', { id: id(p), title: title(p) || u, url: u, added_on: date(p, 'Date Added') || p.created_time.slice(0, 10), done: checkbox(p, 'Done'), needs_manual: checkbox(p, 'Needs manual'), notion_id: id(p) }));
-  }
-  report.links = rows.length;
 }
 if (want('garage')) {
   const cars = await query(DS.garage);

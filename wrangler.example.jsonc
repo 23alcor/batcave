@@ -22,6 +22,8 @@
   // Without this it lives at https://batcave.<your-subdomain>.workers.dev
   // "routes": [{ "pattern": "cave.example.com", "custom_domain": true }],
   "observability": { "enabled": true },
+  // Optional: summarize session transcripts that are still waiting, every 5 minutes (Sessions page).
+  // "triggers": { "crons": ["*/5 * * * *"] },
   // Your settings. Change them any time and run `npm run deploy`.
   "vars": {
     "APP_NAME": "Batcave",              // sidebar, page titles, login page, home-screen icon
