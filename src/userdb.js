@@ -8,10 +8,11 @@ import m4 from '../migrations/0004_habit_cadence.sql';
 import m5 from '../migrations/0005_transcripts.sql';
 import m6 from '../migrations/0006_drop_links.sql';
 import m7 from '../migrations/0007_recipes.sql';
+import m9 from '../migrations/0009_eating_out.sql';
 
 // Per-user schema, applied in order. A new migration that changes per-user tables goes here too (append only).
 // 0002 (login lockout) and 0008 (accounts) are install-wide and stay in D1.
-const MIGRATIONS = [m1, m3, m4, m5, m6, m7];
+const MIGRATIONS = [m1, m3, m4, m5, m6, m7, m9];
 
 export class UserDB extends DurableObject {
   constructor(ctx, env) {

@@ -25,6 +25,7 @@ password. Name it, rename the assistant, and set your time zone in one config fi
 - **Projects page**: click **Edit** to add or delete projects. Deleting hides the project, keeps its tasks, and supports Undo / Redo.
 - **Daily page**: daily habits, weekly habits (done once each Sunday–Saturday week) and their history.
 - **Recipes page**: medium cards with an **Add recipe** card. Save a name, time, servings, ingredients and instructions; view or edit a recipe, or permanently remove it after confirmation. Alfred can find, read, add, edit and remove recipes from chat.
+- **Eating out page**: restaurants you want to try and ones you've been to, with cuisine and area. Log what you ate at each place (with notes); logging a dish moves the place to **Been**. Status changes and dish logs support Undo / Redo.
 - **Assistant** (bottom-left, press `/`): "what's overdue?", "move my dentist appointment to Friday at 3",
   "add laundry as a weekly habit". It uses OpenAI with tools over your data; recipe removal is permanent and requires an explicit request.
   Give it a vague to-do and it picks a sensible time from your free slots.

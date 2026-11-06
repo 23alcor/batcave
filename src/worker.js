@@ -488,6 +488,43 @@ async function api(req, env, url, ctx) {
     await env.DB.prepare('UPDATE wishlist SET status = ?1, acquired_on = CASE WHEN ?1 = \'Bought\' THEN ?2 ELSE acquired_on END WHERE id = ?3').bind(b.status, localNow().date, match[1]).run();
     return json({ ok: true });
   }
+  if (path === '/api/eating' && m === 'GET') {
+    const { results: places } = await env.DB.prepare('SELECT * FROM places ORDER BY created_at DESC, rowid DESC').all();
+    const { results: dishes } = await env.DB.prepare('SELECT * FROM place_dishes ORDER BY day DESC, created_at DESC').all();
+    return json({ places, dishes });
+  }
+  if (path === '/api/eating' && m === 'POST') {
+    const b = await body(req);
+    const name = str(b.name, 300);
+    if (!name) return bad('name is required');
+    const id = newId();
+    await env.DB.prepare('INSERT INTO places (id, name, cuisine, area, status) VALUES (?1, ?2, ?3, ?4, ?5)')
+      .bind(id, name, str(b.cuisine, 60) || null, str(b.area, 120) || null, b.status === 'been' ? 'been' : 'want').run();
+    return json({ id }, 201);
+  }
+  if ((match = path.match(/^\/api\/eating\/([\w-]+)$/)) && m === 'PATCH') {
+    const b = await body(req);
+    if (!['want', 'been'].includes(b.status)) return bad('status must be want or been');
+    const result = await env.DB.prepare('UPDATE places SET status = ?1 WHERE id = ?2').bind(b.status, match[1]).run();
+    return result.meta.changes ? json({ ok: true }) : bad('place not found', 404);
+  }
+  if ((match = path.match(/^\/api\/eating\/([\w-]+)\/dishes$/)) && m === 'POST') {
+    const b = await body(req);
+    const name = str(b.name, 300);
+    if (!name) return bad('name is required');
+    if (!(await env.DB.prepare('SELECT 1 FROM places WHERE id = ?1').bind(match[1]).first())) return bad('place not found', 404);
+    const id = newId();
+    await env.DB.batch([
+      env.DB.prepare('INSERT INTO place_dishes (id, place_id, name, notes, day) VALUES (?1, ?2, ?3, ?4, ?5)')
+        .bind(id, match[1], name, str(b.notes, 2000) || null, isDay(b.day) ? b.day : localNow().date),
+      env.DB.prepare("UPDATE places SET status = 'been' WHERE id = ?1").bind(match[1]),
+    ]);
+    return json({ id }, 201);
+  }
+  if ((match = path.match(/^\/api\/eating\/dishes\/([\w-]+)$/)) && m === 'DELETE') {
+    await env.DB.prepare('DELETE FROM place_dishes WHERE id = ?1').bind(match[1]).run();
+    return json({ ok: true });
+  }
   return bad('not found', 404);
 }
 

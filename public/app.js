@@ -89,7 +89,7 @@ function when(t) {
 const greeting = (hm) => { const h = +hm.slice(0, 2); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 
 // ---------- shared state ----------
-const state = { dash: null, weekStart: null, wishFilter: 'Searching' };
+const state = { dash: null, weekStart: null, wishFilter: 'Searching', eatFilter: 'want' };
 async function refreshDash() {
   state.dash = await api('/api/dashboard');
   const k = state.dash.kpis;
@@ -642,6 +642,28 @@ async function viewWishlist(view) {
         <label class="sr" for="ws-${esc(i.id)}">Status</label><select id="ws-${esc(i.id)}" class="input" style="min-height:34px;flex:0 0 auto" data-action="wish-status" data-id="${esc(i.id)}" data-prev="${esc(i.status)}">${WISH_STATUSES.map((s) => `<option${s === i.status ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></div>`).join('')}`).join('') || '<div class="empty">Nothing here.</div>'}
     </section>`;
 }
+// ---------- eating out ----------
+const EAT_FILTERS = [['want', 'Want to go'], ['been', 'Been'], ['all', 'All']];
+async function viewEating(view) {
+  const { places, dishes } = await api('/api/eating');
+  const f = state.eatFilter, shown = places.filter((p) => f === 'all' || p.status === f);
+  const day = (d) => esc(fmtDay(d, { month: 'short', day: 'numeric', year: 'numeric' }));
+  view.innerHTML = `
+    <header class="head"><div><h1>Eating out</h1><div class="sub">${places.filter((p) => p.status === 'want').length} to try · ${places.filter((p) => p.status === 'been').length} been</div></div></header>
+    <section class="card"><form class="form-row" data-form="add-place"><label class="sr" for="pl-n">Place</label><input id="pl-n" class="input" name="name" placeholder="Add a place…" required>
+      <label class="sr" for="pl-c">Cuisine</label><input id="pl-c" class="input" name="cuisine" placeholder="Cuisine" list="eat-cuisines" style="flex:0 1 160px"><datalist id="eat-cuisines">${[...new Set(places.map((p) => p.cuisine).filter(Boolean))].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+      <label class="sr" for="pl-a">Area</label><input id="pl-a" class="input" name="area" placeholder="Area" style="flex:0 1 160px">
+      <label class="sr" for="pl-s">Status</label><select id="pl-s" class="input" name="status" style="flex:0 1 140px"><option value="want">Want to go</option><option value="been">Been</option></select>
+      <button class="btn primary">Add</button></form></section>
+    <div class="chips" role="group" aria-label="Show">${EAT_FILTERS.map(([v, label]) => `<button class="chip${f === v ? ' on' : ''}" data-action="eat-filter" data-filter="${v}" aria-pressed="${f === v}">${label}</button>`).join('')}</div>
+    ${shown.length ? `<div class="grid-auto">${shown.map((p) => `<section class="card">
+      <div class="card-head"><div><h2>${esc(p.name)}</h2>${p.cuisine || p.area ? `<div class="muted" style="font-size:13px">${[p.cuisine, p.area].filter(Boolean).map(esc).join(' · ')}</div>` : ''}</div>
+        <label class="sr" for="ps-${esc(p.id)}">Status</label><select id="ps-${esc(p.id)}" class="input" style="min-height:34px;flex:0 0 auto;width:auto" data-action="place-status" data-id="${esc(p.id)}" data-prev="${esc(p.status)}"><option value="want"${p.status === 'want' ? ' selected' : ''}>Want to go</option><option value="been"${p.status === 'been' ? ' selected' : ''}>Been</option></select></div>
+      ${dishes.filter((d) => d.place_id === p.id).map((d) => `<div class="row"><span class="grow">${esc(d.name)}${d.notes ? `<span class="meta">${esc(d.notes)}</span>` : ''}</span><span class="when muted">${d.day ? day(d.day) : ''}</span></div>`).join('') || (p.status === 'been' ? '<div class="muted">No dishes logged yet.</div>' : '')}
+      <form class="form-row" data-form="add-dish" data-id="${esc(p.id)}" data-status="${esc(p.status)}" style="margin-top:10px"><label class="sr" for="dn-${esc(p.id)}">Dish</label><input id="dn-${esc(p.id)}" class="input" name="name" placeholder="What did you eat?" required>
+        <label class="sr" for="dt-${esc(p.id)}">Notes</label><input id="dt-${esc(p.id)}" class="input" name="notes" placeholder="Notes"><button class="btn">Log</button></form>
+    </section>`).join('')}</div>` : '<section class="card"><div class="empty">Nothing here.</div></section>'}`;
+}
 async function viewSpending(view) {
   view.innerHTML = `<header class="head"><div><h1>Spending</h1><div class="sub">Budget, finance tracker and purchase planner</div></div></header>
     <section class="card"><h2>Not moved over yet</h2><p class="muted" style="margin:8px 0 0">Your Monthly Budget, Budget &amp; Finance Tracker and Monthly Purchase Planner are still in Notion. They will come over in the next step of the import, once I know which of them you still use.</p></section>`;
@@ -715,11 +737,11 @@ async function viewSession(view, id) {
 }
 
 // ---------- router ----------
-const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, sessions: viewSessions, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending, recipes: viewRecipes };
+const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, sessions: viewSessions, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending, recipes: viewRecipes, eating: viewEating };
 async function render() {
   const [, page = '', arg] = location.hash.replace(/^#/, '').split('/');
   $$('.nav a, .tabbar a, .more-panel a').forEach((a) => { const p = a.getAttribute('href').replace(/^#\//, ''); if (p === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
-  $('#tab-more').classList.toggle('on', ['projects', 'sessions', 'garage', 'wishlist', 'spending', 'recipes'].includes(page));
+  $('#tab-more').classList.toggle('on', ['projects', 'sessions', 'garage', 'wishlist', 'spending', 'recipes', 'eating'].includes(page));
   showMore(false);
   if (page) { state.homeEdit = false; $('#wg-bar').hidden = true; }
   lastRender = Date.now();
@@ -767,6 +789,14 @@ document.addEventListener('change', async (ev) => {
       await set(next);
       el.dataset.prev = next;
       remember(`Status: ${next}`, () => set(prev), () => set(next));
+    }
+    if (el.dataset.action === 'place-status') {
+      const prev = el.dataset.prev, next = el.value;
+      const set = (status) => api('/api/eating/' + id, { method: 'PATCH', body: { status } });
+      await set(next);
+      el.dataset.prev = next;
+      remember(next === 'been' ? 'Marked as been' : 'Back on the want-to-go list', () => set(prev), () => set(next));
+      rerender();
     }
     if (el.dataset.action === 'ts-target') {
       const prev = el.dataset.prev, next = el.value;
@@ -843,6 +873,7 @@ document.addEventListener('click', async (ev) => {
       rerender();
     }
     if (a === 'wish-filter') { state.wishFilter = el.dataset.filter; render(); }
+    if (a === 'eat-filter') { state.eatFilter = el.dataset.filter; render(); }
     if (a === 'ts-filter') { state.tsFilter = el.dataset.filter; render(); }
     if (a === 'ts-retry' || a === 'ts-again') {
       el.disabled = true; el.textContent = 'Summarizing…';
@@ -892,6 +923,18 @@ document.addEventListener('submit', async (ev) => {
     if (form.dataset.form === 'add-task') await api('/api/tasks', { method: 'POST', body: { title: f.title, project_id: f.project_id || null, due_at: f.due || null } });
     if (form.dataset.form === 'add-inbox') await api('/api/tasks', { method: 'POST', body: { title: f.title, kind: 'inbox' } });
     if (form.dataset.form === 'add-log') await api('/api/garage/logs', { method: 'POST', body: f });
+    if (form.dataset.form === 'add-place') {
+      await api('/api/eating', { method: 'POST', body: f });
+      if (state.eatFilter !== 'all') state.eatFilter = f.status; // show the list the new place landed in
+    }
+    if (form.dataset.form === 'add-dish') {
+      const pid = form.dataset.id, prev = form.dataset.status;
+      let dishId = (await api(`/api/eating/${pid}/dishes`, { method: 'POST', body: f })).id;
+      const undo = async () => { await api('/api/eating/dishes/' + dishId, { method: 'DELETE' }); await api('/api/eating/' + pid, { method: 'PATCH', body: { status: prev } }); };
+      const redo = async () => { dishId = (await api(`/api/eating/${pid}/dishes`, { method: 'POST', body: f })).id; };
+      remember(`Logged ${f.name}`, undo, redo);
+      return render();
+    }
     if (form.dataset.form === 'add-wish') await api('/api/wishlist', { method: 'POST', body: f });
     if (form.dataset.form === 'add-habit') {
       const r = await api('/api/habits', { method: 'POST', body: { name: f.name, cadence: f.cadence || 'daily' } });
