@@ -223,6 +223,9 @@ Things to know:
   their own Google Calendar. While the app is unverified, Google shows them the "unverified app" warning and
   allows at most 100 people.
 - The to-do API, the calendar feed (`GCAL_ICS_URL`) and the transcript cron are only for you.
+- The sign-up page has a **Preview** tab. Its button opens `/demo`, a look-only copy of the app filled with the
+  example data in `examples/demo.sql` (refilled once a day so the dates stay current). Nothing can be saved there,
+  and the assistant and Google sign-in are off.
 
 ## Import from Notion (optional)
 
@@ -261,7 +264,7 @@ npm run deploy
   (30 days), and an IP is locked out after 8 wrong passwords or invite codes in 15 minutes. Until your password
   is set, every page stays locked and nobody can sign up.
 - Cross-site writes are refused. The only public paths are `/login`, `/signup` (which needs an unused invite
-  code), `/privacy`, the icons and app manifest, and the to-do API (which needs `INGEST_TOKEN`).
+  code), `/demo` (the read-only preview), `/privacy`, the icons and app manifest, and the to-do API (which needs `INGEST_TOKEN`).
 - Change the password with `npm run set-password` (or `-- --generate` for a random passphrase saved to
   `.site-password`). Changing it signs out every device.
 

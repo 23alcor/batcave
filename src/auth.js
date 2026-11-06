@@ -113,6 +113,12 @@ button{margin-top:16px;width:100%;min-height:44px;border:0;border-radius:10px;ba
 .err{color:var(--err);font-size:14px;margin:10px 0 0}
 .alt{margin:18px 0 0;font-size:14px;color:var(--muted);text-align:center}
 .alt a{color:var(--ink)}
+.tabs{display:flex;gap:4px;padding:4px;margin:0 0 18px;border-radius:12px;background:var(--bg)}
+.tabs button{margin:0;min-height:38px;background:transparent;color:var(--muted);font-weight:500}
+.tabs button[aria-selected=true]{background:var(--card);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.panel p,.panel ul{margin:0 0 12px;font-size:15px}
+.panel ul{padding-left:20px;color:var(--muted)}
+a.btn{display:flex;align-items:center;justify-content:center;min-height:44px;border-radius:10px;background:var(--accent);color:var(--accent-ink);font-size:15px;font-weight:600;text-decoration:none}
 </style></head>
 <body><main>
 <p class="brand"><svg width="26" height="26" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="9" fill="#0F1012"/><path d="M22 6 A14 14 0 1 0 22 34 A6 14 0 1 1 22 6 Z" fill="#FFFFFF"/></svg>${app}</p>
@@ -137,7 +143,17 @@ ${errLine(error)}
 }
 
 export function signupPage({ error = '', code = '', name = '', email = '' } = {}) {
-  return shell('create account', `<form method="post" action="/signup">
+  return shell('create account', `<div class="tabs" role="tablist" aria-label="Sign up or preview">
+<button type="button" role="tab" id="tab-signup" aria-controls="signup" aria-selected="true">Create account</button>
+<button type="button" role="tab" id="tab-preview" aria-controls="preview" aria-selected="false" tabindex="-1">Preview</button>
+</div>
+<div class="panel" id="preview" role="tabpanel" aria-labelledby="tab-preview" hidden>
+<p>Look around ${esc(cfg.app)} before you make an account. The preview is filled with example data:</p>
+<ul><li>Tasks, projects and an inbox</li><li>A week view with a sample schedule</li><li>Daily and weekly habits</li><li>Garage, wishlist, recipes and places to eat</li></ul>
+<p>It's look-only: nothing you change is saved.</p>
+<a class="btn" href="/demo">Open the preview</a>
+</div>
+<form method="post" action="/signup" id="signup" role="tabpanel" aria-labelledby="tab-signup">
 <input type="hidden" name="timezone" value="">
 <label for="code">Invite code</label>
 <input id="code" type="text" name="code" value="${esc(code)}" autocomplete="off" autocapitalize="characters" spellcheck="false" required ${code ? '' : 'autofocus'}>
@@ -151,5 +167,12 @@ ${errLine(error)}
 <button type="submit">Create account</button>
 </form>
 <p class="alt">Already have an account? <a href="/login">Sign in</a></p>
-<script>try { document.querySelector('[name=timezone]').value = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}</script>`);
+<script>try { document.querySelector('[name=timezone]').value = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
+const tabs = [...document.querySelectorAll('[role=tab]')];
+const pick = (t) => tabs.forEach((b) => { const on = b === t; b.setAttribute('aria-selected', on); b.tabIndex = on ? 0 : -1; document.getElementById(b.getAttribute('aria-controls')).hidden = !on; });
+tabs.forEach((b, i) => {
+  b.onclick = () => pick(b);
+  b.onkeydown = (e) => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { const n = tabs[(i + 1) % 2]; pick(n); n.focus(); } };
+});
+if (location.hash === '#preview') pick(tabs[1]);</script>`);
 }

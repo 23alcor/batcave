@@ -6,6 +6,7 @@ import { cfg, loadConfig, publicConfig, validTz, withUser } from './config.js';
 import { GoogleError, callback as googleCallback, cancelEvent, connect as googleConnect, createEvent, disconnect as googleDisconnect, getEvent, googleEvents, googleState, listCalendars, restoreEvent, setCalendarShown, syncCalendars, updateEvent } from './google.js';
 import { authConfigured, checkPassword, clearFailures, clearSessionCookie, hashPassword, lockedOut, loginPage, makeSessionCookie, recordFailure, safeNext, sessionUser, signupPage } from './auth.js';
 import { userDB, userStub } from './userdb.js';
+import demoSeed from '../examples/demo.sql';
 export { UserDB } from './userdb.js';
 import { summarizePending, transcriptsApi, transcriptsIngest } from './transcripts.js';
 import { weather } from './weather.js';
@@ -725,6 +726,20 @@ function asUser(env, user) {
   };
 }
 
+// The public preview (/demo): a shared, read-only database of example data, refilled once a day so dates stay current.
+const DEMO_COOKIE = 'bc_demo';
+const isDemo = (req) => new RegExp(`(?:^|;\\s*)${DEMO_COOKIE}=1(?:;|$)`).test(req.headers.get('cookie') || '');
+async function demoEnv(env) {
+  const { GCAL_ICS_URL, INGEST_TOKEN, OPENAI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ...shared } = env;
+  const DB = userDB(userStub(env, 'demo'));
+  const today = new Date().toISOString().slice(0, 10); // UTC, like date('now') in demo.sql
+  if ((await DB.prepare("SELECT value FROM meta WHERE key = 'demo:day'").first('value')) !== today) {
+    await DB.batch([DB.prepare(demoSeed), DB.prepare("INSERT INTO meta (key, value) VALUES ('demo:day', ?1)").bind(today)]);
+  }
+  return { ...shared, UID: 'demo', DB };
+}
+const DEMO_SETTINGS = { owner: 'Guest', ownerFull: 'Guest', honorific: 'Guest', tagline: '', role: 'demo' };
+
 export default {
   async fetch(req, env, ctx) {
     loadConfig(env);
@@ -747,23 +762,32 @@ export default {
       }
       if (url.pathname === '/logout' && req.method === 'POST') {
         if (crossSite(req, url)) return bad('forbidden', 403);
-        return redirect('/login', { 'set-cookie': clearSessionCookie() });
+        const res = redirect('/login', { 'set-cookie': clearSessionCookie() });
+        res.headers.append('set-cookie', `${DEMO_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
+        return res;
+      }
+      if (url.pathname === '/demo' && req.method === 'GET') {
+        return redirect('/', { 'set-cookie': `${DEMO_COOKIE}=1; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax` });
       }
       if (PUBLIC_ASSETS.has(url.pathname)) return withHeaders(await env.ASSETS.fetch(req));
       if (url.pathname === '/manifest.webmanifest') return withHeaders(await manifest(env, req));
       if (url.pathname === '/privacy') return html(privacyPage(url.host));
 
       // DEV_BYPASS (local only) signs you in as the owner unless you signed in as someone else.
-      const user = (await sessionUser(req, env)) || (env.DEV_BYPASS === '1' ? { id: 0 } : null);
+      const user = (await sessionUser(req, env)) || (isDemo(req) ? { id: 'demo' } : null) || (env.DEV_BYPASS === '1' ? { id: 0 } : null);
       if (!user) {
         if (url.pathname.startsWith('/api/')) return bad('unauthorized', 401);
         return redirect('/login' + (url.pathname === '/' ? '' : '?next=' + encodeURIComponent(url.pathname + url.search)));
       }
       if (url.pathname.startsWith('/api/') && !['GET', 'HEAD'].includes(req.method) && crossSite(req, url)) return bad('forbidden', 403);
       const path = url.pathname.replace(/\/+$/, '');
+      // The preview is look-don't-touch: no writes (so no assistant either), Google sign-in or account settings.
+      if (user.id === 'demo' && path.startsWith('/api/') && (!['GET', 'HEAD'].includes(req.method) || /^\/api\/(account|admin|google\/(connect|callback))/.test(path))) {
+        return bad('This is a preview, so nothing is saved. Create an account to make it yours.', 403);
+      }
       if (path === '/api/account') return withHeaders(await account(req, env, user));
       if (path.startsWith('/api/admin/')) return withHeaders(user.id ? bad('not found', 404) : await admin(req, env, path));
-      const { env: uenv, settings } = asUser(env, user);
+      const { env: uenv, settings } = user.id === 'demo' ? { env: await demoEnv(env), settings: DEMO_SETTINGS } : asUser(env, user);
       return await withUser(settings, async () => {
         if (url.pathname.startsWith('/api/')) return withHeaders(await api(req, uenv, url, ctx));
         // Pages (no file extension) are fetched without the browser's If-None-Match, so they are never a stale 304.

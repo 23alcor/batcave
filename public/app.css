@@ -616,3 +616,7 @@ button, a, input, select, label { touch-action: manipulation; }
 dialog .set-row .input { flex: 0 1 240px; min-width: 0; }
 .set-btns { display: flex; gap: 6px; flex: none; }
 #set-friends-list .set-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+
+/* Preview banner (/demo) */
+.demo-bar { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; padding: 8px 16px; padding-top: max(8px, env(safe-area-inset-top)); background: var(--accent-soft); color: var(--ink); border-bottom: 1px solid var(--line); font-size: 14px; text-align: center; }
+.demo-bar .btn { text-decoration: none; }

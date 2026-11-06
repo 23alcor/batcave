@@ -1942,7 +1942,7 @@ function openSettings() {
   showMore(false);
   $('#set-sidebar').checked = !sidebarHidden();
   $('#settings').showModal();
-  if (CFG.role === 'friend') loadProfile(); else loadFriends();
+  if (CFG.role === 'friend') loadProfile(); else if (CFG.role === 'owner') loadFriends();
 }
 
 // Friends edit their own name, time zone and password; the owner's settings live in wrangler.jsonc.
@@ -2056,6 +2056,9 @@ document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && $('#ca
   const msg = { connected: 'Google Calendar connected', denied: 'Google Calendar was not connected (access denied)', missing_scope: 'Google Calendar needs permission to edit events. Connect again and allow it.', error: 'Could not connect Google Calendar. Try again.', not_configured: 'Google Calendar sync is not set up on the server yet.' }[g];
   if (msg) { setTimeout(() => toast(msg), 600); history.replaceState(null, '', '/' + location.hash); }
 }
+
+// The public preview (/demo) says so at the top and points back to sign-up.
+if (CFG.role === 'demo') document.body.insertAdjacentHTML('afterbegin', `<div class="demo-bar" role="note"><span>You're looking at a preview with example data. Nothing you change is saved.</span><a class="btn primary small" href="/signup">Create account</a></div>`);
 
 window.addEventListener('hashchange', () => { state.habitEdit = false; render(); });
 render();
