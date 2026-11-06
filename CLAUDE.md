@@ -74,7 +74,8 @@ with a one-time `invites` code at `/signup`) gets their own Durable Object SQLit
 worker.js swaps `env.DB` for a D1-shaped wrapper (`userDB()`), so handlers never filter by user. Per-person
 settings (name, time zone) come through `cfg`, which reads AsyncLocalStorage (`withUser()`); don't cache
 per-person data in module globals without keying it by `env.UID` (see google.js). `/api/account` and
-`/api/admin/*` always use the real D1.
+`/api/admin/*` always use the real D1, and so does Eating out (`env.D1`), so people can share one list: rows carry a
+`space` ('u<uid>' by default; `eat_members` points someone at a shared one, joined with a one-time `eat_codes` code).
 
 **Every visible change can be undone.** Front-end writes call `remember(label, undoFn, redoFn)`, which shows a
 toast with Undo and wires ⌘Z / ⇧⌘Z. Keep both functions idempotent API calls.

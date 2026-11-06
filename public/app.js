@@ -645,11 +645,11 @@ async function viewWishlist(view) {
 // ---------- eating out ----------
 const EAT_FILTERS = [['want', 'Want to go'], ['been', 'Been'], ['all', 'All']];
 async function viewEating(view) {
-  const { places, dishes } = await api('/api/eating');
+  const { places, dishes, members } = await api('/api/eating');
   const f = state.eatFilter, shown = places.filter((p) => f === 'all' || p.status === f);
   const day = (d) => esc(fmtDay(d, { month: 'short', day: 'numeric', year: 'numeric' }));
   view.innerHTML = `
-    <header class="head"><div><h1>Eating out</h1><div class="sub">${places.filter((p) => p.status === 'want').length} to try · ${places.filter((p) => p.status === 'been').length} been</div></div></header>
+    <header class="head"><div><h1>Eating out</h1><div class="sub">${places.filter((p) => p.status === 'want').length} to try · ${places.filter((p) => p.status === 'been').length} been${members.length ? ` · shared with ${members.map(esc).join(', ')}` : ''}</div></div></header>
     <section class="card"><form class="form-row" data-form="add-place"><label class="sr" for="pl-n">Place</label><input id="pl-n" class="input" name="name" placeholder="Add a place…" required>
       <label class="sr" for="pl-c">Cuisine</label><input id="pl-c" class="input" name="cuisine" placeholder="Cuisine" list="eat-cuisines" style="flex:0 1 160px"><datalist id="eat-cuisines">${[...new Set(places.map((p) => p.cuisine).filter(Boolean))].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
       <label class="sr" for="pl-a">Area</label><input id="pl-a" class="input" name="area" placeholder="Area" style="flex:0 1 160px">
@@ -662,7 +662,12 @@ async function viewEating(view) {
       ${dishes.filter((d) => d.place_id === p.id).map((d) => `<div class="row"><span class="grow">${esc(d.name)}${d.notes ? `<span class="meta">${esc(d.notes)}</span>` : ''}</span><span class="when muted">${d.day ? day(d.day) : ''}</span></div>`).join('') || (p.status === 'been' ? '<div class="muted">No dishes logged yet.</div>' : '')}
       <form class="form-row" data-form="add-dish" data-id="${esc(p.id)}" data-status="${esc(p.status)}" style="margin-top:10px"><label class="sr" for="dn-${esc(p.id)}">Dish</label><input id="dn-${esc(p.id)}" class="input" name="name" placeholder="What did you eat?" required>
         <label class="sr" for="dt-${esc(p.id)}">Notes</label><input id="dt-${esc(p.id)}" class="input" name="notes" placeholder="Notes"><button class="btn">Log</button></form>
-    </section>`).join('')}</div>` : '<section class="card"><div class="empty">Nothing here.</div></section>'}`;
+    </section>`).join('')}</div>` : '<section class="card"><div class="empty">Nothing here.</div></section>'}
+    <section class="card"><h2 style="margin-bottom:6px">Share this list</h2>
+      <p class="muted" style="margin:0 0 10px">${members.length ? `You and ${members.map(esc).join(', ')} see the same places and dishes.` : 'Make a one-time code and send it to someone with an account here. When they enter it, you both see the same list.'}</p>
+      <div class="form-row"><button class="btn" data-action="eat-share">Make a share code</button>${members.length ? '<button class="btn" data-action="eat-leave">Leave shared list</button>' : ''}</div>
+      <form class="form-row" data-form="eat-join" style="margin-top:10px"><label class="sr" for="eat-code">Share code</label><input id="eat-code" class="input" name="code" placeholder="Got a code? e.g. ABCD-EFGH" autocapitalize="characters" required><button class="btn">Join</button></form>
+    </section>`;
 }
 async function viewSpending(view) {
   view.innerHTML = `<header class="head"><div><h1>Spending</h1><div class="sub">Budget, finance tracker and purchase planner</div></div></header>
@@ -873,6 +878,16 @@ document.addEventListener('click', async (ev) => {
       rerender();
     }
     if (a === 'wish-filter') { state.wishFilter = el.dataset.filter; render(); }
+    if (a === 'eat-share') {
+      const { code } = await api('/api/eating/share', { method: 'POST' });
+      await navigator.clipboard?.writeText(code).catch(() => {});
+      el.textContent = `Code: ${code} (copied)`;
+    }
+    if (a === 'eat-leave') {
+      if (!el.dataset.armed) { el.dataset.armed = '1'; el.textContent = 'Leave? The shared places stay with the others'; setTimeout(() => { if (el.isConnected) { delete el.dataset.armed; el.textContent = 'Leave shared list'; } }, 4000); return; }
+      await api('/api/eating/leave', { method: 'POST' });
+      toast('Left the shared list. Ask for a new code to rejoin.'); render();
+    }
     if (a === 'eat-filter') { state.eatFilter = el.dataset.filter; render(); }
     if (a === 'ts-filter') { state.tsFilter = el.dataset.filter; render(); }
     if (a === 'ts-retry' || a === 'ts-again') {
@@ -923,6 +938,11 @@ document.addEventListener('submit', async (ev) => {
     if (form.dataset.form === 'add-task') await api('/api/tasks', { method: 'POST', body: { title: f.title, project_id: f.project_id || null, due_at: f.due || null } });
     if (form.dataset.form === 'add-inbox') await api('/api/tasks', { method: 'POST', body: { title: f.title, kind: 'inbox' } });
     if (form.dataset.form === 'add-log') await api('/api/garage/logs', { method: 'POST', body: f });
+    if (form.dataset.form === 'eat-join') {
+      await api('/api/eating/join', { method: 'POST', body: f });
+      toast('Joined. You now share this list.');
+      return render();
+    }
     if (form.dataset.form === 'add-place') {
       await api('/api/eating', { method: 'POST', body: f });
       if (state.eatFilter !== 'all') state.eatFilter = f.status; // show the list the new place landed in

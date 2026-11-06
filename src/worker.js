@@ -388,6 +388,87 @@ async function googleApi(req, env, url, path, m) {
   }
 }
 
+// ---------- eating out (shared lists live in D1, see migrations/0010) ----------
+const eatSpace = async (db, uid) => (await db.prepare('SELECT space FROM eat_members WHERE uid = ?1').bind(uid).first('space')) || 'u' + uid;
+async function eatMembers(db, space) {
+  const { results } = await db.prepare('SELECT uid FROM eat_members WHERE space = ?1').bind(space).all();
+  const uids = results.map((r) => r.uid), own = /^u(\d+)$/.exec(space);
+  if (own && !(await db.prepare('SELECT 1 FROM eat_members WHERE uid = ?1').bind(+own[1]).first())) uids.push(+own[1]);
+  return uids;
+}
+async function eating(req, env, path, m) {
+  if (env.UID === 'demo') return m === 'GET' && path === '/api/eating' ? json({ places: [], dishes: [], members: [] }) : bad('not found', 404);
+  const db = env.D1 || env.DB, uid = env.UID, space = await eatSpace(db, uid);
+  const inSpace = (id) => db.prepare('SELECT status FROM places WHERE id = ?1 AND space = ?2').bind(id, space).first();
+  let match;
+  if (path === '/api/eating' && m === 'GET') {
+    const { results: places } = await db.prepare('SELECT * FROM places WHERE space = ?1 ORDER BY created_at DESC, rowid DESC').bind(space).all();
+    const { results: dishes } = await db.prepare('SELECT d.* FROM place_dishes d JOIN places p ON p.id = d.place_id WHERE p.space = ?1 ORDER BY d.day DESC, d.created_at DESC').bind(space).all();
+    const others = (await eatMembers(db, space)).filter((u) => u !== uid);
+    const { results: names } = others.length ? await db.prepare(`SELECT id, name FROM users WHERE id IN (${others.map(() => '?').join(',')})`).bind(...others).all() : { results: [] };
+    const members = others.map((u) => (u === 0 ? env.OWNER_NAME || 'Owner' : names.find((n) => n.id === u)?.name || 'Someone'));
+    return json({ places, dishes, members });
+  }
+  if (path === '/api/eating' && m === 'POST') {
+    const b = await body(req);
+    const name = str(b.name, 300);
+    if (!name) return bad('name is required');
+    const id = newId();
+    await db.prepare('INSERT INTO places (id, name, cuisine, area, status, space) VALUES (?1, ?2, ?3, ?4, ?5, ?6)')
+      .bind(id, name, str(b.cuisine, 60) || null, str(b.area, 120) || null, b.status === 'been' ? 'been' : 'want', space).run();
+    return json({ id }, 201);
+  }
+  // Sharing: a one-time code lets someone else join your list. Joining brings your own places along if nobody else had them.
+  if (path === '/api/eating/share' && m === 'POST') {
+    const code = inviteCode();
+    await db.prepare('INSERT INTO eat_codes (code, space) VALUES (?1, ?2)').bind(code, space).run();
+    return json({ code }, 201);
+  }
+  if (path === '/api/eating/join' && m === 'POST') {
+    const code = str((await body(req)).code, 40).toUpperCase();
+    const target = await db.prepare('SELECT space FROM eat_codes WHERE code = ?1').bind(code).first('space');
+    if (!target) return bad('That code is not valid or was already used.', 404);
+    if (target === space) return bad('You already share this list.');
+    const alone = (await eatMembers(db, space)).every((u) => u === uid);
+    await db.batch([
+      db.prepare('DELETE FROM eat_codes WHERE code = ?1').bind(code),
+      db.prepare('INSERT INTO eat_members (uid, space) VALUES (?1, ?2) ON CONFLICT(uid) DO UPDATE SET space = ?2').bind(uid, target),
+      ...(alone ? [db.prepare('UPDATE places SET space = ?1 WHERE space = ?2').bind(target, space)] : []),
+    ]);
+    return json({ ok: true });
+  }
+  if (path === '/api/eating/leave' && m === 'POST') {
+    if ((await eatMembers(db, space)).every((u) => u === uid)) return bad('This list is not shared.');
+    // The shared places stay with the others; you start a new, empty list.
+    await db.prepare('INSERT INTO eat_members (uid, space) VALUES (?1, ?2) ON CONFLICT(uid) DO UPDATE SET space = ?2').bind(uid, 'x' + newId()).run();
+    return json({ ok: true });
+  }
+  if ((match = path.match(/^\/api\/eating\/([\w-]+)$/)) && m === 'PATCH') {
+    const b = await body(req);
+    if (!['want', 'been'].includes(b.status)) return bad('status must be want or been');
+    const result = await db.prepare('UPDATE places SET status = ?1 WHERE id = ?2 AND space = ?3').bind(b.status, match[1], space).run();
+    return result.meta.changes ? json({ ok: true }) : bad('place not found', 404);
+  }
+  if ((match = path.match(/^\/api\/eating\/([\w-]+)\/dishes$/)) && m === 'POST') {
+    const b = await body(req);
+    const name = str(b.name, 300);
+    if (!name) return bad('name is required');
+    if (!(await inSpace(match[1]))) return bad('place not found', 404);
+    const id = newId();
+    await db.batch([
+      db.prepare('INSERT INTO place_dishes (id, place_id, name, notes, day) VALUES (?1, ?2, ?3, ?4, ?5)')
+        .bind(id, match[1], name, str(b.notes, 2000) || null, isDay(b.day) ? b.day : localNow().date),
+      db.prepare("UPDATE places SET status = 'been' WHERE id = ?1").bind(match[1]),
+    ]);
+    return json({ id }, 201);
+  }
+  if ((match = path.match(/^\/api\/eating\/dishes\/([\w-]+)$/)) && m === 'DELETE') {
+    await db.prepare('DELETE FROM place_dishes WHERE id = ?1 AND place_id IN (SELECT id FROM places WHERE space = ?2)').bind(match[1], space).run();
+    return json({ ok: true });
+  }
+  return bad('not found', 404);
+}
+
 // ---------- recipes ----------
 async function saveRecipe(env, b, id) {
   const limits = { name: 150, time: 80, servings: 80, description: 500, ingredients: 20000, instructions: 30000 };
@@ -489,43 +570,7 @@ async function api(req, env, url, ctx) {
     await env.DB.prepare('UPDATE wishlist SET status = ?1, acquired_on = CASE WHEN ?1 = \'Bought\' THEN ?2 ELSE acquired_on END WHERE id = ?3').bind(b.status, localNow().date, match[1]).run();
     return json({ ok: true });
   }
-  if (path === '/api/eating' && m === 'GET') {
-    const { results: places } = await env.DB.prepare('SELECT * FROM places ORDER BY created_at DESC, rowid DESC').all();
-    const { results: dishes } = await env.DB.prepare('SELECT * FROM place_dishes ORDER BY day DESC, created_at DESC').all();
-    return json({ places, dishes });
-  }
-  if (path === '/api/eating' && m === 'POST') {
-    const b = await body(req);
-    const name = str(b.name, 300);
-    if (!name) return bad('name is required');
-    const id = newId();
-    await env.DB.prepare('INSERT INTO places (id, name, cuisine, area, status) VALUES (?1, ?2, ?3, ?4, ?5)')
-      .bind(id, name, str(b.cuisine, 60) || null, str(b.area, 120) || null, b.status === 'been' ? 'been' : 'want').run();
-    return json({ id }, 201);
-  }
-  if ((match = path.match(/^\/api\/eating\/([\w-]+)$/)) && m === 'PATCH') {
-    const b = await body(req);
-    if (!['want', 'been'].includes(b.status)) return bad('status must be want or been');
-    const result = await env.DB.prepare('UPDATE places SET status = ?1 WHERE id = ?2').bind(b.status, match[1]).run();
-    return result.meta.changes ? json({ ok: true }) : bad('place not found', 404);
-  }
-  if ((match = path.match(/^\/api\/eating\/([\w-]+)\/dishes$/)) && m === 'POST') {
-    const b = await body(req);
-    const name = str(b.name, 300);
-    if (!name) return bad('name is required');
-    if (!(await env.DB.prepare('SELECT 1 FROM places WHERE id = ?1').bind(match[1]).first())) return bad('place not found', 404);
-    const id = newId();
-    await env.DB.batch([
-      env.DB.prepare('INSERT INTO place_dishes (id, place_id, name, notes, day) VALUES (?1, ?2, ?3, ?4, ?5)')
-        .bind(id, match[1], name, str(b.notes, 2000) || null, isDay(b.day) ? b.day : localNow().date),
-      env.DB.prepare("UPDATE places SET status = 'been' WHERE id = ?1").bind(match[1]),
-    ]);
-    return json({ id }, 201);
-  }
-  if ((match = path.match(/^\/api\/eating\/dishes\/([\w-]+)$/)) && m === 'DELETE') {
-    await env.DB.prepare('DELETE FROM place_dishes WHERE id = ?1').bind(match[1]).run();
-    return json({ ok: true });
-  }
+  if (path.startsWith('/api/eating')) return eating(req, env, path, m);
   return bad('not found', 404);
 }
 
@@ -721,7 +766,7 @@ function asUser(env, user) {
   if (!user.id) return { env: { ...env, UID: 0 }, settings: {} };
   const { GCAL_ICS_URL, INGEST_TOKEN, ...shared } = env;
   return {
-    env: { ...shared, UID: user.id, DB: userDB(userStub(env, user.id)) },
+    env: { ...shared, UID: user.id, DB: userDB(userStub(env, user.id)), D1: env.DB }, // D1 only for shared lists (eating out)
     settings: { owner: user.name, ownerFull: user.name, honorific: user.name, tz: user.timezone, tagline: '', role: 'friend' },
   };
 }
