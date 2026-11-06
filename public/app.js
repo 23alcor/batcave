@@ -1,5 +1,6 @@
 // Batcave front end — vanilla JS, hash routing, talks to /api/*.
 // window.__CFG (name, assistant, time zone…) is filled in by the Worker from wrangler.jsonc vars.
+import { temperature, weatherInfo, weatherIcon } from './weather.js';
 const CFG = { app: 'Batcave', owner: '', assistant: 'Alfred', tz: 'America/New_York', ...(window.__CFG || {}) };
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -122,7 +123,7 @@ function weekHtml(w) {
     ? `${fmtDay(days[0], { month: 'long' })} ${a.getUTCDate()} – ${b.getUTCDate()}, ${b.getUTCFullYear()}`
     : `${fmtDay(days[0], { month: 'short', day: 'numeric' })} – ${fmtDay(days[6], { month: 'short', day: 'numeric' })}, ${b.getUTCFullYear()}`;
 
-  const head = days.map((d) => `<div class="wk-day${d === w.today ? ' today' : ''}"><div class="wk-dow">${fmtDay(d, { weekday: 'short' }).toUpperCase()}</div><div class="wk-num">${parseDay(d).getUTCDate()}</div></div>`).join('');
+  const head = days.map((d) => `<div class="wk-day${d === w.today ? ' today' : ''}"><div class="wk-dow">${fmtDay(d, { weekday: 'short' }).toUpperCase()}</div><div class="wk-num">${parseDay(d).getUTCDate()}</div><div class="wk-weather" data-weather-day="${d}">${dailyWeather(d)}</div></div>`).join('');
   const allday = days.map((d) => {
     const chips = [
       ...w.events.filter((e) => e.allDay && e.start === d).map((e) => ({ cls: 'hol', text: e.title, color: e.color?.startsWith('#') ? e.color : null, ink: e.ink, i: e._i })),
@@ -266,18 +267,50 @@ function countWidget(size, o) {
   return `<section class="card"><div class="card-head"><h2>${o.label}${o.badge || ''}</h2><a href="${o.href}">${o.n > rows.length ? `All ${o.n}` : 'Deadlines'}</a></div>
     <div class="wg-split">${num}<div class="wg-list">${rows.length ? rows.map(taskRow).join('') : `<div class="empty">${o.empty}</div>`}</div></div></section>`;
 }
-// Date widget: weekday in red over a big day number; medium and large add the month with today circled.
+function dailyWeather(day) {
+  const forecast = state.weather?.days?.[day];
+  if (!forecast) return '<span class="muted" title="Weather is unavailable for this date">—</span>';
+  const info = weatherInfo(forecast.code);
+  const label = `${info.label}, high ${temperature(forecast.high, state.weather.unit)}, low ${temperature(forecast.low, state.weather.unit)} · ${state.weather.location}`;
+  return `<span class="weather-daily" role="img" aria-label="${esc(label)}" title="${esc(label)}">${weatherIcon(info.icon)}<span>${temperature(forecast.high)} <span class="muted">${temperature(forecast.low)}</span></span></span>`;
+}
+function currentWeather() {
+  const w = state.weather;
+  if (!w) return '<span class="muted">Locating weather…</span>';
+  if (w.error || !w.current) return `<span class="muted">${esc(w.error || 'Weather unavailable')}</span><button class="btn small" data-action="weather-retry">${w.locationDenied ? 'Use my location' : 'Retry'}</button>`;
+  const info = weatherInfo(w.current.code, w.current.is_day), today = w.days[state.dash.now.date];
+  return `<span class="weather-location" title="${esc(w.location)}">${esc(w.location)}</span><div class="weather-now">${weatherIcon(info.icon)}<span>${temperature(w.current.temperature, w.unit)}</span></div>
+    <span class="weather-condition">${esc(info.label)}</span>${today ? `<span class="weather-range">H:${temperature(today.high)} L:${temperature(today.low)}</span>` : ''}
+    <a class="weather-source" href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer" title="Weather by Open-Meteo · updated ${esc(new Date(w.updated_at).toLocaleTimeString('en-US', { timeZone: CFG.tz, hour: 'numeric', minute: '2-digit' }))}">Open-Meteo</a>`;
+}
+function fillWeather() {
+  $$('[data-weather-today]').forEach((el) => { el.innerHTML = currentWeather(); });
+  $$('[data-weather-day]').forEach((el) => { el.innerHTML = dailyWeather(el.dataset.weatherDay); });
+}
+async function loadWeather() {
+  try {
+    if (!navigator.geolocation) throw new Error('Location is unavailable on this device');
+    const position = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { maximumAge: 900000, timeout: 10000 }));
+    const query = new URLSearchParams({ latitude: position.coords.latitude.toFixed(2), longitude: position.coords.longitude.toFixed(2) });
+    state.weather = await api('/api/weather?' + query);
+  } catch (e) {
+    state.weather = { error: e.code === 1 ? 'Allow location for weather' : 'Weather unavailable', locationDenied: e.code === 1, days: {} };
+  }
+  fillWeather();
+}
+// Keep the date and weather together; medium and large also show the month.
 function dateWidget(day, size) {
   const label = fmtDay(day, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
   const big = `<div class="dw-day"><div class="dw-dow">${esc(fmtDay(day, { weekday: size === 's' ? 'long' : 'short' }))}</div><div class="dw-num">${parseDay(day).getUTCDate()}</div>${size === 's' ? `<div class="dw-mon">${esc(fmtDay(day, { month: 'long' }))}</div>` : ''}</div>`;
-  if (size === 's') return `<section class="card dw dw-s" role="img" aria-label="${esc(label)}">${big}</section>`;
+  const overview = `<div class="dw-overview">${big}<div class="weather-summary" data-weather-today aria-label="Weather">${currentWeather()}</div></div>`;
+  if (size === 's') return `<section class="card dw dw-s" aria-label="${esc(label)} and weather">${overview}</section>`;
   const first = day.slice(0, 8) + '01', start = addDays(first, -parseDay(first).getUTCDay()), cells = [];
   for (let i = 0; i < 42; i++) {
     const c = addDays(start, i);
     if (i % 7 === 0 && i && c.slice(5, 7) !== day.slice(5, 7)) break; // stop after the week the month ends in
     cells.push(c.slice(5, 7) === day.slice(5, 7) ? `<span${c === day ? ' class="today"' : ''}>${+c.slice(8)}</span>` : '<span></span>');
   }
-  return `<section class="card dw dw-${size}" role="img" aria-label="${esc(label)}">${big}
+  return `<section class="card dw dw-${size}" aria-label="${esc(label)} and weather">${overview}
     <div class="dw-cal" aria-hidden="true"><div class="dw-cal-head">${esc(fmtDay(day, { month: 'long' }))}</div>
       <div class="dw-grid">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w) => `<b>${w}</b>`).join('')}${cells.join('')}</div></div></section>`;
 }
@@ -303,7 +336,7 @@ const WIDGETS = {
     return firstWeek ? '<section class="card week" id="week" aria-label="Week view"><div class="empty" style="margin:0 20px 16px">Loading week…</div></section>'
       : '<section class="card"><div class="empty">The week view is already on this page.</div></section>';
   } },
-  date: { name: 'Date', desc: 'Today’s date, like the iPhone’s. Medium and Large add the month.', sizes: 'sml', html: (d, size) => dateWidget(d.now.date, size) },
+  date: { name: 'Date & weather', desc: 'Today’s date and local weather. Medium and Large add the month.', sizes: 'sml', html: (d, size) => dateWidget(d.now.date, size) },
   projects: { name: 'Projects', desc: 'Progress of open projects', sizes: 'ml', html: (d) => projectsHtml(d.projects, 'Projects') },
   focus: { name: 'Focus', desc: 'What to do next', sizes: 'ml', html: (d, size) => {
     const list = size === 'l' ? [...d.due.today, ...d.due.overdue.slice().reverse(), ...d.due.soon].slice(0, 8) : d.focus;
@@ -371,7 +404,7 @@ async function viewCommand(view) {
   const d = await refreshDash();
   state.layout = fitLayout(d.layout);
   drawHome(view, false);
-  await Promise.all([loadWeek(state.weekStart), loadAgenda()]);
+  await Promise.all([loadWeek(state.weekStart), loadAgenda(), loadWeather()]);
 }
 function calendarControls(w) {
   const g = w.google || {};
@@ -425,7 +458,7 @@ async function viewDeadlines(view) {
     <header class="head"><div><h1>Deadlines</h1><div class="sub">${tasks.length} open across all projects</div></div></header>
     <section class="card"><form class="form-row" data-form="add-task">
       <label class="sr" for="nt-title">New task</label><input id="nt-title" class="input" name="title" placeholder="Add a task…" required>
-      <label class="sr" for="nt-proj">Project</label><select id="nt-proj" class="input" name="project_id" style="flex:0 1 220px"><option value="">No project</option>${d.allProjects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
+      <label class="sr" for="nt-proj">Project</label><select id="nt-proj" class="input" name="project_id" style="flex:0 1 220px"><option value="">Other</option>${d.allProjects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
       <label class="sr" for="nt-due">Due date</label><input id="nt-due" class="input" type="date" name="due" style="flex:0 1 170px">
       <button class="btn primary">Add</button></form></section>
     ${groups.map(([key, label, open]) => {
@@ -438,10 +471,10 @@ async function viewDeadlines(view) {
 async function viewInbox(view) {
   const { tasks } = await api('/api/tasks?view=inbox');
   view.innerHTML = `
-    <header class="head"><div><h1>Inbox</h1><div class="sub">Loose ideas and to-dos without a project. Check off what is done, promote what matters.</div></div></header>
+    <header class="head"><div><h1>Inbox</h1><div class="sub">Loose ideas and to-dos. Check off what is done, promote what matters.</div></div></header>
     <section class="card"><form class="form-row" data-form="add-inbox"><label class="sr" for="ni">New inbox item</label><input id="ni" class="input" name="title" placeholder="Capture something…" required><button class="btn primary">Add</button></form></section>
     <section class="card">${tasks.length ? tasks.map((t) => `<div class="row"><input type="checkbox" class="check" data-action="done" data-id="${esc(t.id)}" aria-label="Mark ${esc(t.title)} done">
-      <span class="grow">${esc(t.title)}${t.notes ? `<span class="meta">${esc(t.notes)}</span>` : ''}</span>
+      <span class="grow">${esc(t.title)}<span class="meta">${esc(t.project || 'Other')}</span>${t.notes ? `<span class="meta">${esc(t.notes)}</span>` : ''}</span>
       ${t.due_at ? `<span class="when muted">${esc(fmtDay(t.due_at.slice(0, 10), { month: 'short', day: 'numeric' }))}</span>` : ''}
       <button class="btn small" data-action="to-task" data-id="${esc(t.id)}">Make task</button></div>`).join('') : '<div class="empty">Inbox zero.</div>'}</section>`;
 }
@@ -523,6 +556,74 @@ async function viewGarage(view) {
       <label class="sr" for="lg-m">Mileage</label><input id="lg-m" class="input" name="mileage" inputmode="numeric" placeholder="Mileage" style="flex:0 1 120px">
       <button class="btn primary">Add</button></form></section>`;
 }
+async function viewRecipes(view) {
+  const { recipes } = await api('/api/recipes');
+  view.innerHTML = `<header class="head"><div><h1>Recipes</h1><div class="sub">Your recipes, all in one place.</div></div></header>
+    <div class="recipe-grid">${recipes.map((r) => `<article class="card recipe-card">
+      <h2>${esc(r.name)}</h2>
+      ${r.time || r.servings ? `<div class="recipe-meta">${[r.time, r.servings].filter(Boolean).map(esc).join(' · ')}</div>` : ''}
+      ${r.description ? `<p class="recipe-description">${esc(r.description)}</p>` : ''}
+      <div class="recipe-actions"><button class="recipe-link" data-action="recipe-view" data-id="${esc(r.id)}" aria-label="View ${esc(r.name)}">View recipe</button><button class="recipe-link recipe-edit" data-action="recipe-edit" data-id="${esc(r.id)}" aria-label="Edit ${esc(r.name)}">Edit</button></div>
+    </article>`).join('')}
+    <button class="card recipe-card recipe-add" data-action="recipe-add"><span class="recipe-plus" aria-hidden="true">+</span><strong>Add recipe</strong><small>Save something worth making again.</small></button></div>`;
+}
+
+// The native dialog keeps recipe drafts open if saving fails.
+function openRecipe(recipe = null, edit = true) {
+  const dlg = $('#recipe-dialog'), form = $('#recipe-form');
+  form.reset();
+  form.elements.name.setCustomValidity('');
+  dlg.dataset.id = recipe?.id || '';
+  for (const name of ['name', 'time', 'servings', 'description', 'ingredients', 'instructions']) form.elements[name].value = recipe?.[name] || '';
+  $('#recipe-title').textContent = edit ? (recipe ? 'Edit recipe' : 'Add recipe') : recipe.name;
+  $('#recipe-fields').hidden = !edit;
+  form.elements.name.required = edit;
+  $('#recipe-reader').hidden = edit;
+  $('#recipe-reader').innerHTML = recipe && !edit ? `
+    <p class="recipe-meta">${[recipe.time, recipe.servings].filter(Boolean).map(esc).join(' · ')}</p>
+    ${recipe.description ? `<p class="recipe-text muted">${esc(recipe.description)}</p>` : ''}
+    <h3>Ingredients</h3><p class="recipe-text">${esc(recipe.ingredients || 'No ingredients added yet.')}</p>
+    <h3>Instructions</h3><p class="recipe-text">${esc(recipe.instructions || 'No instructions added yet.')}</p>` : '';
+  $('#recipe-save').hidden = !edit;
+  $('#recipe-edit').hidden = edit;
+  $('#recipe-remove').hidden = !recipe;
+  $('#recipe-remove').textContent = 'Remove';
+  delete $('#recipe-remove').dataset.armed;
+  $('#recipe-close').textContent = edit ? 'Cancel' : 'Close';
+  $('#recipe-error').hidden = true;
+  if (!dlg.open) dlg.showModal();
+  if (edit) form.elements.name.focus();
+}
+$('#recipe-close').onclick = () => $('#recipe-dialog').close();
+$('#recipe-edit').onclick = () => openRecipe({ id: $('#recipe-dialog').dataset.id, ...Object.fromEntries(new FormData($('#recipe-form'))) });
+$('#recipe-form').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const form = ev.currentTarget, dlg = $('#recipe-dialog'), data = Object.fromEntries(new FormData(form));
+  if (!data.name.trim()) { form.elements.name.setCustomValidity('Enter a recipe name.'); form.elements.name.reportValidity(); return; }
+  const controls = $$('button, input, textarea', form);
+  controls.forEach((el) => { el.disabled = true; });
+  dlg.dataset.busy = '1';
+  $('#recipe-error').hidden = true;
+  try {
+    await api('/api/recipes' + (dlg.dataset.id ? '/' + dlg.dataset.id : ''), { method: dlg.dataset.id ? 'PUT' : 'POST', body: data });
+    dlg.close(); toast('Recipe saved'); await render();
+  } catch (e) { $('#recipe-error').textContent = e.message; $('#recipe-error').hidden = false; }
+  finally { controls.forEach((el) => { el.disabled = false; }); delete dlg.dataset.busy; }
+};
+$('#recipe-form').elements.name.oninput = (ev) => ev.target.setCustomValidity('');
+$('#recipe-dialog').addEventListener('cancel', (ev) => { if (ev.currentTarget.dataset.busy) ev.preventDefault(); });
+$('#recipe-remove').onclick = async () => {
+  const button = $('#recipe-remove'), dlg = $('#recipe-dialog');
+  if (!button.dataset.armed) { button.dataset.armed = '1'; button.textContent = 'Confirm removal'; return; }
+  const buttons = $$('button', dlg);
+  buttons.forEach((b) => { b.disabled = true; }); dlg.dataset.busy = '1';
+  try {
+    await api('/api/recipes/' + dlg.dataset.id, { method: 'DELETE' });
+    dlg.close(); toast('Recipe removed'); await render();
+  } catch (e) { $('#recipe-error').textContent = e.message; $('#recipe-error').hidden = false; }
+  finally { buttons.forEach((b) => { b.disabled = false; }); delete dlg.dataset.busy; }
+};
+
 const WISH_STATUSES = ['Searching', 'Waiting for discount', 'Saving money', 'Bought', 'Gave up'];
 async function viewWishlist(view) {
   const { items } = await api('/api/wishlist');
@@ -614,11 +715,11 @@ async function viewSession(view, id) {
 }
 
 // ---------- router ----------
-const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, sessions: viewSessions, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending };
+const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, sessions: viewSessions, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending, recipes: viewRecipes };
 async function render() {
   const [, page = '', arg] = location.hash.replace(/^#/, '').split('/');
   $$('.nav a, .tabbar a, .more-panel a').forEach((a) => { const p = a.getAttribute('href').replace(/^#\//, ''); if (p === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
-  $('#tab-more').classList.toggle('on', ['projects', 'sessions', 'garage', 'wishlist', 'spending'].includes(page));
+  $('#tab-more').classList.toggle('on', ['projects', 'sessions', 'garage', 'wishlist', 'spending', 'recipes'].includes(page));
   showMore(false);
   if (page) { state.homeEdit = false; $('#wg-bar').hidden = true; }
   lastRender = Date.now();
@@ -681,6 +782,15 @@ document.addEventListener('click', async (ev) => {
   if (!el) return;
   const a = el.dataset.action;
   try {
+    if (a === 'weather-retry') await loadWeather();
+    if (a === 'recipe-add') openRecipe();
+    if (a === 'recipe-view' || a === 'recipe-edit') {
+      el.disabled = true;
+      try {
+        const { recipe } = await api('/api/recipes/' + el.dataset.id);
+        openRecipe(recipe, a === 'recipe-edit');
+      } finally { el.disabled = false; }
+    }
     if (a === 'week-prev') await loadWeek(addDays(state.weekStart, -7));
     if (a === 'week-next') await loadWeek(addDays(state.weekStart, 7));
     if (a === 'week-today') { state.weekStart = null; await loadWeek(null); }
@@ -797,7 +907,7 @@ document.addEventListener('submit', async (ev) => {
 function openQuick() {
   const dlg = $('#quick');
   const sel = $('select[name="project_id"]', dlg);
-  if (state.dash) sel.innerHTML = '<option value="">No project</option>' + state.dash.allProjects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  if (state.dash) sel.innerHTML = '<option value="">Other</option>' + state.dash.allProjects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
   $('#quick-form').reset();
   dlg.dataset.type = 'task';
   dlg.showModal();
@@ -1789,7 +1899,72 @@ function openSettings() {
   showMore(false);
   $('#set-sidebar').checked = !sidebarHidden();
   $('#settings').showModal();
+  if (CFG.role === 'friend') loadProfile(); else loadFriends();
 }
+
+// Friends edit their own name, time zone and password; the owner's settings live in wrangler.jsonc.
+async function loadProfile() {
+  const sec = $('#set-profile'), form = $('[data-form="profile"]', sec);
+  const a = await api('/api/account').catch((e) => { toast(e.message); return null; });
+  if (!a) return;
+  const zones = (Intl.supportedValuesOf?.('timeZone') || []).filter((z) => z !== a.timezone);
+  form.timezone.innerHTML = [a.timezone, ...zones].map((z) => `<option>${esc(z)}</option>`).join('');
+  form.name.value = a.name;
+  $('#set-email').textContent = a.email;
+  sec.hidden = false;
+}
+
+// Owner: invite codes (one sign-up each) and who has signed up, with the space each person uses.
+const kb = (n) => (n == null ? '?' : n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`);
+async function loadFriends() {
+  const sec = $('#set-friends');
+  const d = await api('/api/admin/friends').catch(() => null);
+  if (!d) return;
+  const link = (code) => `${location.origin}/signup?code=${encodeURIComponent(code)}`;
+  const open = d.invites.filter((i) => !i.used_at);
+  $('#set-friends-list').innerHTML = `
+    ${open.map((i) => `<div class="set-row"><span><code>${esc(i.code)}</code>${i.note ? ` <span class="muted">· ${esc(i.note)}</span>` : ''}</span>
+      <span class="set-btns"><button type="button" class="btn small" data-copy="${esc(link(i.code))}">Copy link</button><button type="button" class="btn small" data-uninvite="${esc(i.code)}">Delete</button></span></div>`).join('')}
+    ${d.users.map((u) => `<div class="set-row"><span>${esc(u.name || u.email)} <span class="muted">· ${esc(u.email)} · ${kb(u.bytes)}</span></span>
+      <button type="button" class="btn small" data-reset-user="${u.id}" data-name="${esc(u.name || u.email)}">Reset password</button></div>`).join('')}
+    ${!open.length && !d.users.length ? '<p class="muted" style="margin:6px 0">No friends yet. Make an invite code and send them the link.</p>' : ''}`;
+  sec.hidden = false;
+}
+$('#set-friends').addEventListener('click', async (ev) => {
+  const copy = ev.target.closest('[data-copy]'), del = ev.target.closest('[data-uninvite]'), reset = ev.target.closest('[data-reset-user]');
+  try {
+    if (copy) { await navigator.clipboard.writeText(copy.dataset.copy); toast('Sign-up link copied'); }
+    if (del) { await api('/api/admin/invites/' + encodeURIComponent(del.dataset.uninvite), { method: 'DELETE' }); toast('Invite deleted'); loadFriends(); }
+    if (reset && confirm(`Give ${reset.dataset.name} a new password? Their old one stops working.`)) {
+      const r = await api(`/api/admin/users/${reset.dataset.resetUser}/reset`, { method: 'POST' });
+      prompt(`New password for ${reset.dataset.name}. Send it to them; they can change it in Settings.`, r.password);
+    }
+  } catch (e) { toast(e.message); }
+});
+$('#settings').addEventListener('submit', async (ev) => {
+  const form = ev.target.closest('form[data-form]');
+  if (!['profile', 'password', 'invite'].includes(form?.dataset.form)) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const f = Object.fromEntries(new FormData(form));
+  try {
+    if (form.dataset.form === 'profile') {
+      await api('/api/account', { method: 'PATCH', body: { name: f.name, timezone: f.timezone } });
+      location.reload(); // the greeting, assistant and every date use these
+    }
+    if (form.dataset.form === 'password') {
+      await api('/api/account', { method: 'PATCH', body: { current_password: f.current_password, password: f.password } });
+      form.reset();
+      toast('Password changed. Other devices are signed out.');
+    }
+    if (form.dataset.form === 'invite') {
+      const { code } = await api('/api/admin/invites', { method: 'POST', body: { note: f.note } });
+      form.reset();
+      await loadFriends();
+      await navigator.clipboard.writeText(`${location.origin}/signup?code=${code}`).then(() => toast(`Invite ${code} made, sign-up link copied`), () => toast(`Invite ${code} made`));
+    }
+  } catch (e) { toast(e.message); }
+});
 $('#settings-btn').addEventListener('click', openSettings);
 $('#settings-btn-m').addEventListener('click', openSettings);
 $('#settings').addEventListener('click', (ev) => {

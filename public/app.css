@@ -204,6 +204,32 @@ a.ad:hover { text-decoration: none; filter: brightness(1.08); }
 .pc-status { font-size: 12px; font-weight: 600; color: var(--muted); }
 .pc-status.red { color: var(--red); } .pc-status.amber { color: var(--amber); }
 
+/* recipes */
+.recipe-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 16px; }
+.recipe-card { display: flex; flex-direction: column; gap: 12px; min-height: 214px; padding: 20px; }
+.recipe-card h2 { font-size: 17px; overflow-wrap: anywhere; }
+.recipe-meta { font-size: 12px; color: var(--muted); }
+.recipe-description { margin: 0; color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.recipe-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; }
+.recipe-link { padding: 6px 0; border: 0; background: transparent; color: var(--link); cursor: pointer; text-align: left; }
+.recipe-edit { font-size: 12px; color: var(--muted); }
+.recipe-add { align-items: center; justify-content: center; border-style: dashed; background: transparent; color: var(--ink); cursor: pointer; font: inherit; }
+.recipe-add:hover { border-color: var(--muted2); }
+.recipe-add small { color: var(--muted); font-size: 12px; }
+.recipe-plus { font-size: 28px; line-height: 1; color: var(--muted); }
+#recipe-title { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+#recipe-dialog [hidden] { display: none !important; }
+#recipe-fields { display: flex; flex-direction: column; gap: 12px; }
+#recipe-fields[hidden] { display: none; }
+#recipe-fields .form-row label { flex: 1 1 150px; min-width: 0; }
+#recipe-error { margin: 0; }
+.recipe-dialog-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.recipe-remove { margin-left: auto; color: var(--red); }
+#recipe-reader h3 { margin: 20px 0 8px; font-size: 14px; }
+#recipe-reader p { margin: 0 0 12px; }
+.recipe-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 820px) { .recipe-link { min-height: 44px; } }
+
 /* lists */
 .row { display: flex; align-items: center; gap: 10px; min-height: 44px; border-top: 1px solid var(--line2); }
 .row:first-of-type { border-top: 0; }
@@ -367,9 +393,9 @@ body.wg-dragging { cursor: grabbing; -webkit-user-select: none; user-select: non
 .dw-s .dw-day { display: flex; flex-direction: column; flex: 1; }
 .dw-s .dw-num { font-size: 76px; margin: auto 0; }
 .dw-m, .dw-l { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 28px; align-items: center; }
-.dw-cal { max-width: 360px; width: 100%; justify-self: end; }
+.dw-cal { max-width: 360px; width: 100%; min-width: 0; justify-self: end; }
 .dw-cal-head { margin-bottom: 4px; color: var(--red); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
-.dw-grid { display: grid; grid-template-columns: repeat(7, 1fr); row-gap: 2px; text-align: center; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dw-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); row-gap: 2px; text-align: center; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .dw-grid b { color: var(--muted); font-size: 10px; font-weight: 700; }
 .dw-grid span { width: 24px; height: 24px; line-height: 24px; margin: 0 auto; border-radius: 50%; }
 .dw-grid .today { background: var(--red-bar); color: #FFFFFF; }
@@ -378,6 +404,34 @@ body.wg-dragging { cursor: grabbing; -webkit-user-select: none; user-select: non
 .dw-l .dw-grid { font-size: 15px; row-gap: 6px; }
 .dw-l .dw-grid b { font-size: 12px; }
 .dw-l .dw-grid span { width: 34px; height: 34px; line-height: 34px; }
+/* Weather shares the existing date tile and each calendar header. */
+.dw { container-type: inline-size; }
+.dw-overview { display: flex; justify-content: space-between; gap: 16px; min-width: 0; width: 100%; }
+.dw-s .dw-overview { flex: 1; min-height: 130px; }
+.dw-m, .dw-l { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.weather-summary { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 3px; min-width: 0; max-width: 160px; text-align: right; font-size: 12px; }
+.weather-location { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.weather-now { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 28px; font-weight: 500; letter-spacing: -.03em; white-space: nowrap; }
+.weather-symbol { flex: none; vertical-align: middle; }
+.weather-now .weather-symbol { width: 24px; height: 24px; }
+.weather-range, .weather-condition { color: var(--muted); }
+.weather-source { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.weather-summary .btn { min-height: 44px; }
+.wk-weather { min-height: 26px; padding: 3px 2px; font-size: 11px; }
+.weather-daily { display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.weather-daily .weather-symbol { width: 16px; height: 16px; }
+@container (max-width: 225px) {
+  .dw-overview { flex-direction: column; gap: 10px; }
+  .weather-summary { align-items: flex-start; text-align: left; }
+}
+@media (max-width: 520px) {
+  .dw-m, .dw-l { gap: 16px; }
+  .dw-m .dw-overview, .dw-l .dw-overview { flex-direction: column; gap: 10px; }
+  .dw-m .weather-summary, .dw-l .weather-summary { align-items: flex-start; text-align: left; }
+  .dw-l .dw-num { font-size: 76px; }
+  .dw-l .dw-grid { font-size: 12px; row-gap: 2px; }
+  .dw-l .dw-grid b { font-size: 10px; }
+}
 /* pop-up bar while editing the home screen */
 .wg-bar { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); z-index: 46; display: flex; gap: 8px; padding: 8px; border-radius: 999px; border: 1px solid var(--line); background: color-mix(in srgb, var(--card) 86%, transparent); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); box-shadow: 0 12px 32px rgba(0, 0, 0, .28); transform: translateX(-50%); animation: wg-bar-in .34s cubic-bezier(.2, .9, .3, 1.15); }
 .wg-bar[hidden] { display: none; }
@@ -506,8 +560,8 @@ button, a, input, select, label { touch-action: manipulation; }
   .dw-s .dw-num { font-size: 64px; }
   .dw-l .dw-num { font-size: 72px; }
   .dw-m, .dw-l { gap: 16px; }
-  .dw-grid span { width: 22px; height: 22px; line-height: 22px; }
-  .dw-l .dw-grid span { width: 28px; height: 28px; line-height: 28px; }
+  .dw-grid span { width: min(22px, 100%); height: 22px; line-height: 22px; }
+  .dw-l .dw-grid span { width: min(28px, 100%); height: 28px; line-height: 28px; }
   .wg-split > .num { font-size: 30px; }
   .cal-num { font-size: 30px; }
   .kpi { padding: 14px; }
@@ -556,3 +610,9 @@ button, a, input, select, label { touch-action: manipulation; }
   .ts-text { font-size: 16px; }
   .row:has(.badge) { flex-wrap: wrap; padding: 8px 0; }
 }
+
+/* Settings: profile and friends */
+.set-form, form.set-row { margin: 0; padding: 0; }
+dialog .set-row .input { flex: 0 1 240px; min-width: 0; }
+.set-btns { display: flex; gap: 6px; flex: none; }
+#set-friends-list .set-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }

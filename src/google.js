@@ -61,14 +61,15 @@ export async function googleState(env) {
   return { configured: true, connected: !!row && row.status === 'ok', needsReconnect: !!row && row.status !== 'ok', email: row?.email || null };
 }
 
-let refreshing = null; // one token refresh at a time, shared by parallel calendar fetches
+const refreshing = new Map(); // one token refresh at a time per person, shared by parallel calendar fetches
 async function accessToken(env, force = false) {
   const row = await env.DB.prepare('SELECT refresh_enc, access_enc, expires_at, status FROM google_auth WHERE id = 1').first();
   if (!row) throw new GoogleError('Google Calendar is not connected.', 'not_connected');
   if (row.status !== 'ok') throw new GoogleError('Google Calendar needs to be reconnected.', 'reauth');
   if (!force && row.access_enc && row.expires_at > Date.now() + 60e3) return unseal(env, row.access_enc);
-  if (!refreshing) refreshing = refreshToken(env, row).finally(() => { refreshing = null; });
-  return refreshing;
+  const who = env.UID || 0;
+  if (!refreshing.has(who)) refreshing.set(who, refreshToken(env, row).finally(() => refreshing.delete(who)));
+  return refreshing.get(who);
 }
 async function refreshToken(env, row) {
   const { ok, j } = await tokenRequest(env, { grant_type: 'refresh_token', refresh_token: await unseal(env, row.refresh_enc) });
@@ -205,7 +206,7 @@ const readableText = (hex) => {
 
 // Returns events in the week view's shape: { id, calendarId, title, allDay, start, end, location, color, ink, link, recurring }.
 export async function googleEvents(env, start, end, { fresh = false } = {}) {
-  const key = `${start}|${end}`;
+  const key = `${env.UID || 0}|${start}|${end}`;
   const hit = cache.get(key);
   if (!fresh && hit && Date.now() - hit.at < 30e3) return hit.events;
   const cals = (await listCalendars(env)).filter((c) => c.shown);

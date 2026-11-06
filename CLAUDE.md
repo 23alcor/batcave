@@ -35,7 +35,8 @@ src/chat.js       Assistant: TOOLS (schemas), makeTools() (handlers), instructio
 src/google.js     Google OAuth + Calendar reads/writes (events are converted to local wall-clock strings)
 src/transcripts.js Sessions: transcript intake, structured-JSON summaries (Responses API), bridge API, cron
 src/calendar.js   Weekly RRULE expansion, iCal parsing, utcToWall()/zonedToUtc()
-src/auth.js       Password hash check, signed session cookie, IP lockout, login page HTML
+src/auth.js       Password hashing, per-user signed session cookie, IP lockout, login and sign-up page HTML
+src/userdb.js     UserDB Durable Object (a friend's own SQLite) + userDB(), a D1-shaped wrapper around it
 src/config.js     cfg (per-install settings) + loadConfig(env) + publicConfig()
 public/app.js     The whole front end, split into "// ---------- name ----------" sections
 public/app.css    Styles; tokens in :root, dark theme, phone rules in @media (max-width: 820px)
@@ -65,7 +66,15 @@ Saturday (`weekStartOf()`), matching the calendar.
 **Schema changes = a new migration.** Add `migrations/000N_name.sql`; never change an applied one (wrangler
 tracks them by file name). Prefer additive changes (`ALTER TABLE … ADD COLUMN … DEFAULT …`) so an old Worker
 still runs while the migration is applied. Small key/value settings can live in the `meta` table instead
-(see the `wake:*` keys).
+(see the `wake:*` keys). A migration that changes per-user tables must also be imported and appended to
+`MIGRATIONS` in src/userdb.js, or friends' databases won't get it.
+
+**Friends (multi-user).** The owner (uid 0, `PASSWORD_HASH`) uses D1. Each invited friend (`users` table, made
+with a one-time `invites` code at `/signup`) gets their own Durable Object SQLite database. `asUser()` in
+worker.js swaps `env.DB` for a D1-shaped wrapper (`userDB()`), so handlers never filter by user. Per-person
+settings (name, time zone) come through `cfg`, which reads AsyncLocalStorage (`withUser()`); don't cache
+per-person data in module globals without keying it by `env.UID` (see google.js). `/api/account` and
+`/api/admin/*` always use the real D1.
 
 **Every visible change can be undone.** Front-end writes call `remember(label, undoFn, redoFn)`, which shows a
 toast with Undo and wires ⌘Z / ⇧⌘Z. Keep both functions idempotent API calls.

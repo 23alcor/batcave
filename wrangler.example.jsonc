@@ -5,6 +5,7 @@
   "name": "batcave",
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_als"],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -18,6 +19,9 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Each invited friend gets their own small SQLite database (a Durable Object). The owner's data stays in D1.
+  "durable_objects": { "bindings": [{ "name": "USERDB", "class_name": "UserDB" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UserDB"] }],
   // Optional: serve it on your own domain (the domain has to be on your Cloudflare account).
   // Without this it lives at https://batcave.<your-subdomain>.workers.dev
   // "routes": [{ "pattern": "cave.example.com", "custom_domain": true }],

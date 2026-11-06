@@ -14,7 +14,8 @@
     "db:migrate:local": "wrangler d1 migrations apply batcave --local",
     "db:examples": "wrangler d1 execute batcave --remote --file examples/starter.sql",
     "db:examples:local": "wrangler d1 execute batcave --local --file examples/starter.sql",
-    "import:notion": "node scripts/import-notion.mjs"
+    "import:notion": "node scripts/import-notion.mjs",
+    "test": "node --import ./scripts/node-shims.mjs --test scripts/test-alfred.mjs scripts/test-weather.mjs"
   },
   "engines": {
     "node": ">=20"

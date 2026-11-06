@@ -21,16 +21,19 @@ password. Name it, rename the assistant, and set your time zone in one config fi
   click or drag on empty space to create, click an event for a details card. Changes go straight to Google
   Calendar. Tasks with a time sit in the grid too (tick to finish, drag to reschedule).
 - **Wake-up line** on every day (drag to change one day; click to set a weekday or the default).
+- **Weather** beside the date and in each calendar day header: current conditions and daily highs/lows in Fahrenheit from [Open-Meteo](https://open-meteo.com/), cached for 15 minutes. Allow browser location access to follow your device; coordinates are rounded to two decimals before fetching the forecast. Dates outside the forecast range show a dash.
 - **Projects page**: click **Edit** to add or delete projects. Deleting hides the project, keeps its tasks, and supports Undo / Redo.
 - **Daily page**: daily habits, weekly habits (done once each Sunday–Saturday week) and their history.
+- **Recipes page**: medium cards with an **Add recipe** card. Save a name, time, servings, ingredients and instructions; view or edit a recipe, or permanently remove it after confirmation. Alfred can find, read, add, edit and remove recipes from chat.
 - **Assistant** (bottom-left, press `/`): "what's overdue?", "move my dentist appointment to Friday at 3",
-  "add laundry as a weekly habit". It uses OpenAI with tools over your data; it adds and changes, never permanently deletes.
+  "add laundry as a weekly habit". It uses OpenAI with tools over your data; recipe removal is permanent and requires an explicit request.
   Give it a vague to-do and it picks a sensible time from your free slots.
+  New tasks are matched to your active projects using their context; tasks with no clear match are labeled **Other**.
 - **To-do API**: send a sentence from a phone shortcut or script; the assistant files it and answers.
 - **Sessions**: send in the transcript of a work or study session (a chat with an AI tool, a coding-agent run);
   it's summarized into a short session note, matched to the right note, and handed to your notes app through a
   small bridge (for example an Obsidian vault on your computer).
-- **Undo everywhere** with ⌘Z / Ctrl+Z, and an **iPhone** layout you can add to your home screen.
+- **Undo** supported changes with ⌘Z / Ctrl+Z, and an **iPhone** layout you can add to your home screen.
 
 ## Quick start
 
@@ -200,6 +203,26 @@ calendar feed: `npx wrangler secret put GCAL_ICS_URL` with your calendar's secre
 The refresh token is stored encrypted in D1 (AES-GCM, key derived from `SESSION_SECRET`). Repeating events are
 edited one occurrence at a time.
 
+## Inviting friends
+
+Friends can get their own Batcave on your install. Each one has a separate, private database (a Cloudflare
+Durable Object), so nobody sees anyone else's data. Your own data stays in D1.
+
+1. **Settings → Friends → New invite code.** The sign-up link (`https://YOUR_SITE/signup?code=…`) is copied for
+   you. Send it to your friend. Each code works once.
+2. They pick a first name, email and password. Their time zone comes from their browser, and they can change
+   it, their name and their password under **Settings → Profile**.
+3. Settings → Friends lists everyone with how much space they use. **Reset password** gives you a new password
+   to send them, and **Delete** removes an invite nobody has used yet.
+
+Things to know:
+
+- You sign in with your usual password. The email box takes any name that isn't a friend's email.
+- Friends share your `OPENAI_API_KEY` (the assistant has no usage limit) and your Google OAuth app. They connect
+  their own Google Calendar. While the app is unverified, Google shows them the "unverified app" warning and
+  allows at most 100 people.
+- The to-do API, the calendar feed (`GCAL_ICS_URL`) and the transcript cron are only for you.
+
 ## Import from Notion (optional)
 
 `scripts/import-notion.mjs` pulls tasks, projects, an inbox, a garage and a wishlist from Notion
@@ -233,10 +256,11 @@ npm run deploy
 
 ## Security
 
-- One password protects everything: PBKDF2-SHA256, a signed HttpOnly session cookie (30 days), and an IP lockout
-  after 8 wrong tries in 15 minutes. Until a password is set, every page stays locked.
-- Cross-site writes are refused. The only public paths are `/login`, `/privacy`, the icons and app manifest, and the
-  to-do API (which needs `INGEST_TOKEN`).
+- Your password and each friend's are stored as PBKDF2-SHA256 hashes. Sessions are signed HttpOnly cookies
+  (30 days), and an IP is locked out after 8 wrong passwords or invite codes in 15 minutes. Until your password
+  is set, every page stays locked and nobody can sign up.
+- Cross-site writes are refused. The only public paths are `/login`, `/signup` (which needs an unused invite
+  code), `/privacy`, the icons and app manifest, and the to-do API (which needs `INGEST_TOKEN`).
 - Change the password with `npm run set-password` (or `-- --generate` for a random passphrase saved to
   `.site-password`). Changing it signs out every device.
 

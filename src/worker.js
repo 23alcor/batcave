@@ -2,10 +2,13 @@
 // Personal settings (name, time zone, assistant name…) come from wrangler.jsonc vars via src/config.js.
 import { expandEvents, parseICS } from './calendar.js';
 import { chat, processTodo } from './chat.js';
-import { cfg, loadConfig, publicConfig } from './config.js';
+import { cfg, loadConfig, publicConfig, validTz, withUser } from './config.js';
 import { GoogleError, callback as googleCallback, cancelEvent, connect as googleConnect, createEvent, disconnect as googleDisconnect, getEvent, googleEvents, googleState, listCalendars, restoreEvent, setCalendarShown, syncCalendars, updateEvent } from './google.js';
-import { authConfigured, checkPassword, clearFailures, clearSessionCookie, hasSession, lockedOut, loginPage, makeSessionCookie, recordFailure, safeNext } from './auth.js';
+import { authConfigured, checkPassword, clearFailures, clearSessionCookie, hashPassword, lockedOut, loginPage, makeSessionCookie, recordFailure, safeNext, sessionUser, signupPage } from './auth.js';
+import { userDB, userStub } from './userdb.js';
+export { UserDB } from './userdb.js';
 import { summarizePending, transcriptsApi, transcriptsIngest } from './transcripts.js';
+import { weather } from './weather.js';
 
 
 // ---------- helpers ----------
@@ -97,7 +100,7 @@ const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00:00Z') - new Date(
 
 async function openTasks(env) {
   const { results } = await env.DB.prepare(
-    `SELECT t.id, t.title, t.project_id, t.kind, t.due_at, t.date_tbd, t.url, t.notes, p.short_name AS project, p.color AS project_color
+    `SELECT t.id, t.title, t.project_id, t.kind, t.due_at, t.date_tbd, t.url, t.notes, COALESCE(p.short_name, p.name, 'Other') AS project, p.color AS project_color
      FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
      WHERE t.status = 'open' ORDER BY t.due_at IS NULL, t.due_at`
   ).all();
@@ -209,7 +212,7 @@ async function events(env, url) {
   }
   if (!evs) evs = expandEvents(await calendarSource(env), start, end);
   const { results } = await env.DB.prepare(
-    `SELECT t.id, t.title, t.due_at, t.notes, p.short_name AS project FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
+    `SELECT t.id, t.title, t.due_at, t.notes, COALESCE(p.short_name, p.name, 'Other') AS project FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
      WHERE t.status = 'open' AND t.kind = 'task' AND t.date_tbd = 0 AND t.due_at IS NOT NULL AND substr(t.due_at,1,10) >= ?1 AND substr(t.due_at,1,10) < ?2
      ORDER BY t.due_at`
   ).bind(start, end).all();
@@ -232,7 +235,7 @@ async function listTasks(env, url) {
   for (const t of rows) { t.bucket = bucket(t, today); t.days = t.due_at ? daysBetween(today, t.due_at.slice(0, 10)) : null; }
   if (['overdue', 'today', 'soon', 'later', 'tbd', 'nodate'].includes(view)) rows = rows.filter((t) => t.bucket === view);
   if (url.searchParams.get('include') === 'done') {
-    const { results } = await env.DB.prepare(`SELECT t.*, p.short_name AS project FROM tasks t LEFT JOIN projects p ON p.id = t.project_id WHERE t.status = 'done' ${project ? 'AND t.project_id = ?1' : ''} ORDER BY t.done_at DESC LIMIT 50`).bind(...(project ? [project] : [])).all();
+    const { results } = await env.DB.prepare(`SELECT t.*, COALESCE(p.short_name, p.name, 'Other') AS project FROM tasks t LEFT JOIN projects p ON p.id = t.project_id WHERE t.status = 'done' ${project ? 'AND t.project_id = ?1' : ''} ORDER BY t.done_at DESC LIMIT 50`).bind(...(project ? [project] : [])).all();
     return { today, tasks: rows, done: results };
   }
   return { today, tasks: rows };
@@ -384,11 +387,49 @@ async function googleApi(req, env, url, path, m) {
   }
 }
 
+// ---------- recipes ----------
+async function saveRecipe(env, b, id) {
+  const limits = { name: 150, time: 80, servings: 80, description: 500, ingredients: 20000, instructions: 30000 };
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return bad('send a recipe object');
+  for (const [field, max] of Object.entries(limits)) {
+    if (b[field] !== undefined && (typeof b[field] !== 'string' || b[field].length > max)) return bad(`${field} must be text, up to ${max} characters`);
+  }
+  if (!b.name?.trim()) return bad('name is required');
+  const values = Object.keys(limits).map((key) => (b[key] || '').trim());
+  if (id) {
+    const result = await env.DB.prepare('UPDATE recipes SET name = ?1, time = ?2, servings = ?3, description = ?4, ingredients = ?5, instructions = ?6 WHERE id = ?7').bind(...values, id).run();
+    if (!result.meta.changes) return bad('recipe not found', 404);
+    return json({ id });
+  }
+  id = newId();
+  await env.DB.prepare('INSERT INTO recipes (name, time, servings, description, ingredients, instructions, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)').bind(...values, id).run();
+  return json({ id }, 201);
+}
+
+async function deleteRecipe(env, id) {
+  const result = await env.DB.prepare('DELETE FROM recipes WHERE id = ?1').bind(id).run();
+  return result.meta.changes ? json({ ok: true }) : bad('recipe not found', 404);
+}
+
 // ---------- router ----------
 async function api(req, env, url, ctx) {
   const m = req.method;
   const path = url.pathname.replace(/\/+$/, '');
   let match;
+  if (path === '/api/weather' && m === 'GET') return weather(url, ctx);
+  if (path === '/api/recipes' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT * FROM recipes ORDER BY created_at DESC, rowid DESC').all();
+    return json({ recipes: results });
+  }
+  if (path === '/api/recipes' && m === 'POST') return saveRecipe(env, await body(req));
+  if ((match = path.match(/^\/api\/recipes\/([\w-]+)$/))) {
+    if (m === 'GET') {
+      const recipe = await env.DB.prepare('SELECT * FROM recipes WHERE id = ?1').bind(match[1]).first();
+      return recipe ? json({ recipe }) : bad('recipe not found', 404);
+    }
+    if (m === 'PUT') return saveRecipe(env, await body(req), match[1]);
+    if (m === 'DELETE') return deleteRecipe(env, match[1]);
+  }
   if (path === '/api/chat' && m === 'POST') return chat(req, env, alfredLib());
   if (path === '/api/transcripts' || path.startsWith('/api/transcripts/')) return (await transcriptsApi(req, env, url, ctx)) || bad('not found', 404);
   if (path.startsWith('/api/google/') || path.startsWith('/api/calendar/')) return googleApi(req, env, url, path, m);
@@ -467,7 +508,7 @@ function privacyPage(host) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${app} · Privacy</title>
 <style>body{margin:0;background:#0F1012;color:#E6E6E8;font:16px/1.6 system-ui,-apple-system,sans-serif}main{max-width:680px;margin:0 auto;padding:40px 20px}h1{font-size:26px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 6px}p,li{color:#C9CBD1}a{color:#B4B7FF}</style></head>
 <body><main><h1>${app} privacy policy</h1>
-<p>${app} (${escHtml(host)}) is a private, password-protected personal dashboard used only by its owner${who ? `, ${who}` : ''}. It is not offered to the public.</p>
+<p>${app} (${escHtml(host)}) is a private, password-protected personal dashboard run by ${who || 'its owner'} for themselves and a few invited friends. It is not offered to the public; each person sees only their own data.</p>
 <h2>Google Calendar data</h2><ul>
 <li>When the owner connects Google Calendar, ${app} reads events from the calendars the owner chooses so they appear on the dashboard, and creates, moves or cancels events only when the owner asks it to.</li>
 <li>Event data is fetched on demand and held only briefly in memory to draw the page. The Google sign-in token is stored encrypted and is used only to talk to Google Calendar on the owner's behalf.</li>
@@ -487,22 +528,28 @@ async function manifest(env, req) {
 // The app page: put your settings into the HTML before it reaches the browser (no flash of defaults).
 function personalize(res) {
   if (!(res.headers.get('content-type') || '').includes('text/html')) return res;
+  // Read now: the handlers below run while the body streams, after this request's settings are gone.
+  const { app, tagline } = cfg;
   const ask = `Ask ${cfg.assistant}`;
   const json = JSON.stringify(publicConfig()).replace(/</g, '\\u003c');
-  return new HTMLRewriter()
-    .on('title', { element(el) { el.setInnerContent(cfg.app); } })
-    .on('meta[name="apple-mobile-web-app-title"]', { element(el) { el.setAttribute('content', cfg.app); } })
-    .on('[data-cfg="app"]', { element(el) { el.setInnerContent(cfg.app); } })
+  const out = new HTMLRewriter()
+    .on('title', { element(el) { el.setInnerContent(app); } })
+    .on('meta[name="apple-mobile-web-app-title"]', { element(el) { el.setAttribute('content', app); } })
+    .on('[data-cfg="app"]', { element(el) { el.setInnerContent(app); } })
     .on('[data-cfg="ask"]', { element(el) { el.setInnerContent(ask); } })
     .on('[data-cfg-title="ask"]', { element(el) { el.setAttribute('title', `${ask} (/)`); } })
     .on('[data-cfg-label="ask"]', { element(el) { el.setAttribute('aria-label', ask); } })
-    .on('[data-cfg="tagline"]', { element(el) { if (cfg.tagline) el.setInnerContent(cfg.tagline); else el.remove(); } })
+    .on('[data-cfg="tagline"]', { element(el) { if (tagline) el.setInnerContent(tagline); else el.remove(); } })
     .on('head', { element(el) { el.append(`<script>window.__CFG=${json};</script>`, { html: true }); } })
     .transform(res);
+  // The page differs per person, so it must never be served from the browser cache (an ETag would allow that).
+  out.headers.set('cache-control', 'no-store');
+  out.headers.delete('etag');
+  return out;
 }
 
 // What Alfred's tools call into (chat window and to-do API).
-const alfredLib = () => ({ dashboard, events, wakeConfig, setWake, weekStartOf, listTasks, createTask, updateTask, createProject, updateProject, createHabit, updateHabit, localNow, addDays, bucket, google: { state: googleState, listCalendars, createEvent, updateEvent, cancelEvent, GoogleError } });
+const alfredLib = () => ({ dashboard, events, wakeConfig, setWake, weekStartOf, listTasks, createTask, updateTask, createProject, updateProject, saveRecipe, deleteRecipe, createHabit, updateHabit, localNow, addDays, bucket, google: { state: googleState, listCalendars, createEvent, updateEvent, cancelEvent, GoogleError } });
 
 // POST /api/ingest/todo — JSON {text | title | name | task, notes?, due_at?, url?, source?, alfred?} or a plain-text body.
 // ?format=text answers with just Alfred's sentence (handy for a phone/Mac shortcut notification).
@@ -528,20 +575,117 @@ async function ingestTodo(req, env, url) {
   return json(r.body, r.status);
 }
 
+// ---------- accounts: sign in, sign up with an invite code ----------
+const clientIp = (req) => req.headers.get('cf-connecting-ip') || 'local';
+const formOf = async (req) => { try { return await req.formData(); } catch { return null; } };
+
+// Friends sign in with their email. Anything else is checked against the owner's password (PASSWORD_HASH).
 async function login(req, env, url) {
   if (crossSite(req, url)) return bad('forbidden', 403);
   if (!authConfigured(env)) return html(loginPage({ error: 'Login is not set up yet.' }), 503);
-  const ip = req.headers.get('cf-connecting-ip') || 'local';
+  const ip = clientIp(req);
   if (await lockedOut(env, ip)) return html(loginPage({ error: 'Too many wrong attempts. Try again in 15 minutes.' }), 429);
-  let form;
-  try { form = await req.formData(); } catch { return html(loginPage({ error: 'Something went wrong. Try again.' }), 400); }
-  const next = form.get('next');
-  if (!(await checkPassword(String(form.get('password') || ''), env.PASSWORD_HASH))) {
+  const form = await formOf(req);
+  if (!form) return html(loginPage({ error: 'Something went wrong. Try again.' }), 400);
+  const next = form.get('next'), email = str(form.get('email'), 200).toLowerCase(), password = String(form.get('password') || '');
+  const friend = email ? await env.DB.prepare('SELECT id, password_hash FROM users WHERE email = ?1').bind(email).first() : null;
+  const ok = friend ? await checkPassword(password, friend.password_hash) : await checkPassword(password, env.PASSWORD_HASH);
+  if (!ok) {
     await recordFailure(env, ip);
-    return html(loginPage({ error: 'Wrong password.', next: safeNext(next), hash: form.get('hash') }), 401);
+    return html(loginPage({ error: 'Wrong email or password.', next: safeNext(next), hash: form.get('hash'), email }), 401);
   }
   await clearFailures(env, ip);
-  return redirect(safeNext(next, form.get('hash')), { 'set-cookie': await makeSessionCookie(env) });
+  const cookie = friend ? await makeSessionCookie(env, friend.id, friend.password_hash) : await makeSessionCookie(env);
+  return redirect(safeNext(next, form.get('hash')), { 'set-cookie': cookie });
+}
+
+async function signup(req, env, url) {
+  if (crossSite(req, url)) return bad('forbidden', 403);
+  if (!authConfigured(env)) return html(signupPage({ error: 'Sign-up is not set up yet.' }), 503);
+  const ip = clientIp(req);
+  if (await lockedOut(env, ip)) return html(signupPage({ error: 'Too many wrong attempts. Try again in 15 minutes.' }), 429);
+  const form = await formOf(req);
+  if (!form) return html(signupPage({ error: 'Something went wrong. Try again.' }), 400);
+  const code = str(form.get('code'), 40).toUpperCase(), name = str(form.get('name'), 40), email = str(form.get('email'), 200).toLowerCase();
+  const password = String(form.get('password') || ''), tz = str(form.get('timezone'), 60);
+  const again = (error, status = 400) => html(signupPage({ error, code, name, email }), status);
+  if (!name) return again('Enter your first name.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return again('Enter a valid email address.');
+  if (password.length < 8 || password.length > 200) return again('Use a password of at least 8 characters.');
+  if (await env.DB.prepare('SELECT 1 FROM users WHERE email = ?1').bind(email).first()) return again('There is already an account with that email. Sign in instead.', 409);
+  const hash = await hashPassword(password);
+  // One transaction: the account is only created if the code is still unused, and the code is used up with it.
+  const [made] = await env.DB.batch([
+    env.DB.prepare('INSERT INTO users (email, password_hash, name, timezone) SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM invites WHERE code = ?5 AND used_at IS NULL)')
+      .bind(email, hash, name, validTz(tz) && tz ? tz : cfg.tz, code),
+    env.DB.prepare("UPDATE invites SET used_by = (SELECT id FROM users WHERE email = ?1), used_at = datetime('now') WHERE code = ?2 AND used_at IS NULL").bind(email, code),
+  ]);
+  if (!made.meta.changes) { await recordFailure(env, ip); return again('That invite code is not valid or was already used.', 403); }
+  const user = await env.DB.prepare('SELECT id, password_hash FROM users WHERE email = ?1').bind(email).first();
+  return redirect('/', { 'set-cookie': await makeSessionCookie(env, user.id, user.password_hash) });
+}
+
+// A friend's own settings (name, time zone, password). The owner's come from wrangler.jsonc.
+async function account(req, env, user) {
+  if (!user.id) return bad('the owner\'s settings are in wrangler.jsonc', 400);
+  if (req.method === 'GET') return json({ email: user.email, name: user.name, timezone: user.timezone });
+  if (req.method !== 'PATCH') return bad('not found', 404);
+  const b = await body(req);
+  const sets = [], vals = [];
+  if ('name' in b) { const n = str(b.name, 40); if (!n) return bad('name cannot be empty'); sets.push(`name = ?${vals.push(n)}`); }
+  if ('timezone' in b) { if (typeof b.timezone !== 'string' || !b.timezone || !validTz(b.timezone)) return bad('unknown time zone'); sets.push(`timezone = ?${vals.push(b.timezone)}`); }
+  let cookie = null;
+  if ('password' in b) {
+    if (!(await checkPassword(String(b.current_password || ''), user.password_hash))) return bad('current password is wrong', 403);
+    if (typeof b.password !== 'string' || b.password.length < 8 || b.password.length > 200) return bad('use at least 8 characters');
+    const hash = await hashPassword(b.password);
+    sets.push(`password_hash = ?${vals.push(hash)}`);
+    cookie = await makeSessionCookie(env, user.id, hash); // other devices are signed out, this one stays in
+  }
+  if (!sets.length) return bad('nothing to update');
+  await env.DB.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?${vals.length + 1}`).bind(...vals, user.id).run();
+  const res = json({ ok: true });
+  if (cookie) res.headers.set('set-cookie', cookie);
+  return res;
+}
+
+// Owner only: invite codes and the list of friends with how much space each one uses.
+const inviteCode = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', r = crypto.getRandomValues(new Uint8Array(8)); return [...r].map((n) => a[n % a.length]).join('').replace(/^(.{4})/, '$1-'); };
+async function admin(req, env, path) {
+  const m = req.method;
+  let match;
+  if (path === '/api/admin/friends' && m === 'GET') {
+    const { results: invites } = await env.DB.prepare('SELECT i.code, i.note, i.created_at, i.used_at, u.email AS used_by FROM invites i LEFT JOIN users u ON u.id = i.used_by ORDER BY i.created_at DESC').all();
+    const { results: users } = await env.DB.prepare('SELECT id, email, name, timezone, created_at FROM users ORDER BY created_at').all();
+    await Promise.all(users.map(async (u) => { u.bytes = await userStub(env, u.id).size().catch(() => null); }));
+    return json({ invites, users });
+  }
+  if (path === '/api/admin/invites' && m === 'POST') {
+    const code = inviteCode();
+    await env.DB.prepare('INSERT INTO invites (code, note) VALUES (?1, ?2)').bind(code, str((await body(req)).note, 80) || null).run();
+    return json({ code }, 201);
+  }
+  if ((match = path.match(/^\/api\/admin\/invites\/([A-Z0-9-]+)$/)) && m === 'DELETE') {
+    const r = await env.DB.prepare('DELETE FROM invites WHERE code = ?1 AND used_at IS NULL').bind(match[1]).run();
+    return r.meta.changes ? json({ ok: true }) : bad('not found or already used', 404);
+  }
+  if ((match = path.match(/^\/api\/admin\/users\/(\d+)\/reset$/)) && m === 'POST') {
+    const password = inviteCode().toLowerCase() + '-' + inviteCode().toLowerCase();
+    const r = await env.DB.prepare('UPDATE users SET password_hash = ?1 WHERE id = ?2').bind(await hashPassword(password), Number(match[1])).run();
+    return r.meta.changes ? json({ password }) : bad('not found', 404);
+  }
+  return bad('not found', 404);
+}
+
+// What a signed-in person's request runs with: the owner uses D1 and wrangler.jsonc settings; a friend gets
+// their own database and settings, and none of the owner's integrations (calendar feed, ingest token).
+function asUser(env, user) {
+  if (!user.id) return { env: { ...env, UID: 0 }, settings: {} };
+  const { GCAL_ICS_URL, INGEST_TOKEN, ...shared } = env;
+  return {
+    env: { ...shared, UID: user.id, DB: userDB(userStub(env, user.id)) },
+    settings: { owner: user.name, ownerFull: user.name, honorific: user.name, tz: user.timezone, tagline: '', role: 'friend' },
+  };
 }
 
 export default {
@@ -557,8 +701,12 @@ export default {
       }
       if (url.pathname === '/login') {
         if (req.method === 'POST') return await login(req, env, url);
-        if (await hasSession(req, env)) return redirect(safeNext(url.searchParams.get('next')));
+        if (await sessionUser(req, env)) return redirect(safeNext(url.searchParams.get('next')));
         return html(loginPage({ next: safeNext(url.searchParams.get('next')) }));
+      }
+      if (url.pathname === '/signup') {
+        if (req.method === 'POST') return await signup(req, env, url);
+        return html(signupPage({ code: str(url.searchParams.get('code'), 40).toUpperCase() }));
       }
       if (url.pathname === '/logout' && req.method === 'POST') {
         if (crossSite(req, url)) return bad('forbidden', 403);
@@ -568,24 +716,32 @@ export default {
       if (url.pathname === '/manifest.webmanifest') return withHeaders(await manifest(env, req));
       if (url.pathname === '/privacy') return html(privacyPage(url.host));
 
-      const authed = env.DEV_BYPASS === '1' || (await hasSession(req, env));
-      if (!authed) {
+      // DEV_BYPASS (local only) signs you in as the owner unless you signed in as someone else.
+      const user = (await sessionUser(req, env)) || (env.DEV_BYPASS === '1' ? { id: 0 } : null);
+      if (!user) {
         if (url.pathname.startsWith('/api/')) return bad('unauthorized', 401);
         return redirect('/login' + (url.pathname === '/' ? '' : '?next=' + encodeURIComponent(url.pathname + url.search)));
       }
-      if (url.pathname.startsWith('/api/')) {
-        if (!['GET', 'HEAD'].includes(req.method) && crossSite(req, url)) return bad('forbidden', 403);
-        return withHeaders(await api(req, env, url, ctx));
-      }
-      return withHeaders(personalize(await env.ASSETS.fetch(req)));
+      if (url.pathname.startsWith('/api/') && !['GET', 'HEAD'].includes(req.method) && crossSite(req, url)) return bad('forbidden', 403);
+      const path = url.pathname.replace(/\/+$/, '');
+      if (path === '/api/account') return withHeaders(await account(req, env, user));
+      if (path.startsWith('/api/admin/')) return withHeaders(user.id ? bad('not found', 404) : await admin(req, env, path));
+      const { env: uenv, settings } = asUser(env, user);
+      return await withUser(settings, async () => {
+        if (url.pathname.startsWith('/api/')) return withHeaders(await api(req, uenv, url, ctx));
+        // Pages (no file extension) are fetched without the browser's If-None-Match, so they are never a stale 304.
+        const page = !/\.\w+$/.test(url.pathname);
+        return withHeaders(personalize(await env.ASSETS.fetch(page ? new Request(req.url) : req)));
+      });
     } catch (err) {
       console.error(err);
       return bad('server error', 500);
     }
   },
-  // Optional cron (see wrangler.example.jsonc): summarize session transcripts that are still waiting.
+  // Optional cron (see wrangler.example.jsonc): summarize the owner's session transcripts that are still waiting.
+  // shortcut: friends' transcripts are only summarized when they arrive or on request; loop over users if they need it.
   async scheduled(event, env, ctx) {
     loadConfig(env);
-    ctx.waitUntil(summarizePending(env).catch((e) => console.error('cron transcripts', e.message)));
+    ctx.waitUntil(summarizePending({ ...env, UID: 0 }).catch((e) => console.error('cron transcripts', e.message)));
   },
 };

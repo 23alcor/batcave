@@ -38,6 +38,7 @@
       <a href="#/garage">Garage</a>
       <a href="#/wishlist">Wishlist</a>
       <a href="#/spending">Spending</a>
+      <a href="#/recipes">Recipes</a>
     </nav>
     <div class="side-foot">
       <button type="button" class="ask-btn" id="ask-btn" aria-controls="chat" aria-expanded="false" title="Ask Alfred (/)" data-cfg-title="ask">
@@ -70,11 +71,36 @@
     <a href="#/garage">Garage</a>
     <a href="#/wishlist">Wishlist</a>
     <a href="#/spending">Spending</a>
+    <a href="#/recipes">Recipes</a>
     <div class="more-sep"></div>
     <button type="button" class="more-item" id="settings-btn-m" aria-haspopup="dialog">Settings</button>
     <form method="post" action="/logout"><button type="submit" class="more-item">Lock</button></form>
   </div>
 </div>
+
+<dialog id="recipe-dialog" aria-labelledby="recipe-title">
+  <form id="recipe-form">
+    <h2 id="recipe-title">Add recipe</h2>
+    <div id="recipe-reader" hidden></div>
+    <div id="recipe-fields">
+      <label>Name <input class="input" name="name" required maxlength="150" autocomplete="off"></label>
+      <div class="form-row">
+        <label>Time <input class="input" name="time" maxlength="80" placeholder="30 min"></label>
+        <label>Servings <input class="input" name="servings" maxlength="80" placeholder="2 servings"></label>
+      </div>
+      <label>Short note <input class="input" name="description" maxlength="500"></label>
+      <label>Ingredients <textarea class="input" name="ingredients" maxlength="20000" rows="5" placeholder="One ingredient per line"></textarea></label>
+      <label>Instructions <textarea class="input" name="instructions" maxlength="30000" rows="6"></textarea></label>
+    </div>
+    <p id="recipe-error" class="red" role="alert" hidden></p>
+    <div class="recipe-dialog-actions">
+      <button class="btn primary" type="submit" id="recipe-save">Save recipe</button>
+      <button class="btn" type="button" id="recipe-edit">Edit recipe</button>
+      <button class="btn" type="button" id="recipe-close">Cancel</button>
+      <button class="btn recipe-remove" type="button" id="recipe-remove">Remove</button>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="quick" aria-labelledby="quick-title">
   <form method="dialog" id="quick-form">
@@ -87,7 +113,7 @@
     </div>
     <label>Title or URL <input class="input" name="title" required autocomplete="off"></label>
     <div class="form-row" data-for="task">
-      <label class="q-project" style="flex:1 1 200px">Project <select class="input" name="project_id"><option value="">No project</option></select></label>
+      <label class="q-project" style="flex:1 1 200px">Project <select class="input" name="project_id"><option value="">Other</option></select></label>
       <label style="flex:1 1 160px"><span class="q-for-task">Due</span><span class="q-for-event">Date</span> <input class="input" type="date" name="due"></label>
       <label style="flex:0 1 130px"><span class="q-for-task">Time</span><span class="q-for-event">Start</span> <input class="input" type="time" name="time"></label>
       <label class="q-for-event" style="flex:0 1 130px">End <input class="input" type="time" name="end"></label>
@@ -112,6 +138,22 @@
     </section>
     <section class="set-group set-desktop" aria-labelledby="set-layout"><h3 id="set-layout">Layout</h3>
       <label class="set-row"><span>Show sidebar <kbd>⌘B</kbd></span><input type="checkbox" class="check" id="set-sidebar"></label>
+    </section>
+    <section class="set-group" id="set-profile" aria-labelledby="set-profile-h" hidden><h3 id="set-profile-h">Profile</h3>
+      <form data-form="profile" class="set-form">
+        <label class="set-row"><span>First name</span><input class="input" name="name" maxlength="40" required autocomplete="given-name"></label>
+        <label class="set-row"><span>Time zone</span><select class="input" name="timezone"></select></label>
+        <div class="set-row"><span class="muted" id="set-email"></span><button type="submit" class="btn small primary">Save</button></div>
+      </form>
+      <form data-form="password" class="set-form">
+        <label class="set-row"><span>Current password</span><input class="input" type="password" name="current_password" autocomplete="current-password" required></label>
+        <label class="set-row"><span>New password</span><input class="input" type="password" name="password" autocomplete="new-password" minlength="8" required></label>
+        <div class="set-row"><span></span><button type="submit" class="btn small">Change password</button></div>
+      </form>
+    </section>
+    <section class="set-group" id="set-friends" aria-labelledby="set-friends-h" hidden><h3 id="set-friends-h">Friends</h3>
+      <form data-form="invite" class="set-row"><input class="input" name="note" maxlength="80" placeholder="Who is it for? (optional)" aria-label="Who the invite is for"><button type="submit" class="btn small primary">New invite code</button></form>
+      <div id="set-friends-list"></div>
     </section>
     <section class="set-group" aria-labelledby="set-account"><h3 id="set-account">Account</h3>
       <div class="set-row"><span>Lock Batcave on this device</span><form method="post" action="/logout"><button type="submit" class="btn small">Lock</button></form></div>
@@ -203,7 +245,7 @@
   <div class="rz" data-rz="n"></div><div class="rz" data-rz="s"></div><div class="rz" data-rz="e"></div><div class="rz" data-rz="w"></div>
   <div class="rz" data-rz="ne"></div><div class="rz" data-rz="nw"></div><div class="rz" data-rz="se"></div><div class="rz" data-rz="sw"></div>
   <header class="chat-head" title="Drag to move · double-click to reset">
-    <div><h2 id="chat-title" data-cfg="ask">Ask Alfred</h2><p class="chat-sub">Reads and updates your tasks, schedule, habits, garage</p></div>
+    <div><h2 id="chat-title" data-cfg="ask">Ask Alfred</h2><p class="chat-sub">Manages your tasks, schedule, habits, garage and recipes</p></div>
     <button type="button" class="icon-btn layout-btn" data-chat="layout" title="Snap to…" aria-label="Choose where the chat sits" aria-haspopup="true" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18M3 12h9"/></svg></button>
     <div class="layout-pop" id="layout-pop" hidden role="menu" aria-label="Snap chat to">
       <button type="button" role="menuitem" data-snap="tl" aria-label="Top left corner"><i></i></button>
