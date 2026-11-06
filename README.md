@@ -16,7 +16,7 @@ password. Name it, rename the assistant, and set your time zone in one config fi
   drag to rearrange, pick Small / Medium / Large, remove with −, or use **+ Add widget** in the bar that pops up.
   The calendar widget shows your next events (small), the rest of today (medium) or the full week (large); the date
   widget shows today like the iPhone's, with the month in medium and large. The layout is saved to your account.
-- **Settings** (bottom-left, or More on a phone): theme, home screen editing, sidebar, and Lock.
+- **Settings** (bottom-left, or More on a phone): theme (Auto, Light, Dark, or a color theme: Nord, Signal, Forest, Solarized, Rosé), home screen editing, sidebar, and Lock.
 - **Week calendar** you edit like Google Calendar: drag events to move them, drag the bottom edge to resize,
   click or drag on empty space to create, click an event for a details card. Changes go straight to Google
   Calendar. Tasks with a time sit in the grid too (tick to finish, drag to reschedule).

@@ -1948,13 +1948,15 @@ document.addEventListener('touchmove', (ev) => { if (wgDrag?.active) ev.preventD
 document.addEventListener('contextmenu', (ev) => { if (ev.target.closest('#home > .wg') && (wgDrag || state.homeEdit)) ev.preventDefault(); });
 
 // ---------- theme ----------
-const THEMES = ['auto', 'light', 'dark'];
+const THEMES = ['auto', 'light', 'dark', 'nord', 'signal', 'forest', 'solarized', 'rose'];
 function applyTheme(t) {
   if (t === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
   $$('[data-theme-pick]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.themePick === t)));
+  // Phone status bar follows the sidebar color.
+  $('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--side').trim());
 }
 let theme = 'auto';
-try { theme = localStorage.getItem('batcave-theme') || 'auto'; } catch { /* storage unavailable */ }
+try { theme = localStorage.getItem('batcave-theme') || 'auto'; if (!THEMES.includes(theme)) theme = 'auto'; } catch { /* storage unavailable */ }
 applyTheme(theme);
 
 // ---------- settings (bottom-left, or More on a phone) ----------
