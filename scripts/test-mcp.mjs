@@ -142,3 +142,22 @@ test('Alfred reads the vault and remembers: the owner via the bridge queue, a fr
   await ask(env.DB, 'demo', []);
   assert.ok(!seen.at(-1).tools.some((x) => ['whoami', 'remember'].includes(x.name)));
 });
+
+test('related_notes follows links both ways, including concepts without a note', async (t) => {
+  const { send, call } = setup(t);
+  const notes = [
+    { path: 'Courses/EECE 448.md', title: 'EECE 448', updated_at: '2026-11-01T10:00', body: 'Uses [[Backpropagation]] and [[CUDA|GPUs]].\n![[Lectures.base#By course]]\nSee [[Research]].' },
+    { path: 'Research.md', title: 'Research', updated_at: '2026-11-02T10:00', body: '# Research\nGPU work, see [[CUDA]].' },
+    { path: 'S/2026-11-05 EECE 448 - Backprop review.md', title: '2026-11-05 EECE 448 - Backprop review', updated_at: '2026-11-05T10:00', body: '---\nproject: "[[Courses/EECE 448]]"\n---\nReviewed [[Backpropagation#Chain rule]].' },
+    { path: 'Other.md', title: 'Other', body: 'Mentions EECE 448 without a link, and [[EECE 4480]].' },
+  ];
+  await send('/api/ingest/vault', 'ingest-test-token', 'PUT', { notes });
+  const r = (await call('related_notes', { note: 'EECE 448' })).data;
+  assert.deepEqual(r.links_to.map((x) => x.path), ['Research.md']);
+  assert.deepEqual(r.mentions_without_note.sort(), ['Backpropagation', 'CUDA'], 'aliases resolve; .base embeds are skipped');
+  assert.deepEqual(r.linked_from.map((x) => x.title), ['2026-11-05 EECE 448 - Backprop review'], 'path-style link counts; plain text and [[EECE 4480]] do not');
+  assert.match(r.linked_from[0].context, /project:/);
+  const concept = (await call('related_notes', { note: 'backpropagation' })).data;
+  assert.equal(concept.note.has_own_note, false);
+  assert.deepEqual(concept.linked_from.map((x) => x.path).sort(), ['Courses/EECE 448.md', 'S/2026-11-05 EECE 448 - Backprop review.md']);
+});

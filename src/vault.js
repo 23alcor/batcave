@@ -18,6 +18,9 @@ export const VAULT_TOOLS = [
   }, ['query']),
   fn('read_note', 'Read one note in full (with its YAML properties). Takes a path from search_notes/list_notes, or a note title.', { path: S('Path like "01 Projects/Batcave/Batcave.md", or a note title') }, ['path']),
   fn('list_notes', 'List notes in their vault, newest first: path, title, tags, last edit.', { folder: S('Optional folder prefix'), limit: { type: 'integer', description: 'Default 50, up to 300' } }),
+  fn('related_notes', 'Follow the links of their notes (a knowledge graph): what a note links to, and every note that links to it, with the line around each link. Works for concepts without a note of their own too, e.g. "CUDA". Use it to widen from one note to related projects, courses, sessions and ideas.', {
+    note: S('A note title or path, or a concept name'),
+  }, ['note']),
   fn('recent_sessions', 'Their recent work and study sessions (session notes): what got done, decisions and next steps. Use for "what have I been working on" or to pick up where a project left off.', {
     days: { type: 'integer', description: 'How far back, default 7, up to 90' }, project: S('Optional project, course or area name, e.g. "Batcave" or "EECE 448"'),
   }),
@@ -33,6 +36,15 @@ function snippet(body, ws) {
 const sectionOf = (body, heading) => {
   const m = body.match(new RegExp(`^## ${heading}\\s*\\n([\\s\\S]*?)(?=^## |$(?![\\s\\S]))`, 'm'));
   return m ? m[1].trim().slice(0, 800) : undefined;
+};
+
+// [[Target]], [[Target|label]], [[Target#heading]], [[Folder/Target]]; ![[embeds]] of non-notes (.base, images) are skipped.
+const LINK = /(!?)\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g;
+const linksIn = (body) => [...new Set([...body.matchAll(LINK)].filter((m) => !(m[1] && /\.\w+$/.test(m[2]))).map((m) => m[2].trim()).filter(Boolean))];
+// LIKE patterns for a link to `title`: [[Title]], [[Title|…]], [[Title#…]] and path-style [[Folder/Title…]].
+const linkPatterns = (title) => {
+  const t = title.toLowerCase().replace(/[\\%_]/g, (c) => '\\' + c);
+  return [']]', '|', '#'].flatMap((end) => [`%[[${t}${end}%`, `%[[%/${t}${end}%`]);
 };
 
 export function vaultTools(env, lib) {
@@ -78,6 +90,34 @@ export function vaultTools(env, lib) {
       if (a.folder) { args.push(clip(a.folder, 200).replace(/\/+$/, '') + '/%'); where = `path LIKE ?${args.length}`; }
       const { results } = await db.prepare(`SELECT path, title, tags, updated_at FROM vault_notes WHERE ${where} ORDER BY updated_at DESC LIMIT ?1`).bind(...args).all();
       return { notes: results };
+    },
+    async related_notes(a) {
+      // shortcut: links are parsed at query time with LIKE scans, fine for a few thousand notes; store them at ingest if it grows.
+      const name = clip(a.note, 300);
+      if (!name) throw new ToolError('note is required');
+      const n = await note(name);
+      const title = n?.title || name.replace(/\.md$/i, '').split('/').pop();
+      const targets = n ? linksIn(n.body) : [];
+      const resolved = [];
+      for (const t of targets.slice(0, 60)) {
+        const hit = await note(t.includes('/') ? t + '.md' : t);
+        resolved.push({ title: t.split('/').pop(), path: hit?.path || null });
+      }
+      const pats = linkPatterns(title);
+      const { results } = await db.prepare(
+        `SELECT path, title, body FROM vault_notes WHERE (${pats.map((_, i) => `lower(body) LIKE ?${i + 1} ESCAPE '\\'`).join(' OR ')}) ${n ? `AND path != ?${pats.length + 1}` : ''}
+         ORDER BY updated_at DESC LIMIT 30`
+      ).bind(...pats, ...(n ? [n.path] : [])).all();
+      const lower = title.toLowerCase();
+      const linked_from = results.map((r) => ({
+        path: r.path, title: r.title,
+        context: (r.body.split('\n').find((l) => linksIn(l).some((t) => t.toLowerCase().split('/').pop() === lower)) || '').trim().slice(0, 240),
+      }));
+      return {
+        note: n ? { path: n.path, title: n.title } : { title, path: null, has_own_note: false },
+        links_to: resolved.filter((r) => r.path), mentions_without_note: resolved.filter((r) => !r.path).map((r) => r.title),
+        linked_from,
+      };
     },
     async recent_sessions(a) {
       const days = Math.min(Math.max(+a.days || 7, 1), 90);

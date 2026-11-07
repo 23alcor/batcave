@@ -31,7 +31,7 @@ const LIST = [...VAULT_TOOLS.map(toMcp), LOG_SESSION, ...TOOLS.filter((t) => REU
 
 const instructions = () => [
   `This server is ${cfg.owner || 'the owner'}'s personal context: their notes vault and their ${cfg.app} dashboard (tasks, calendar, habits and more).`,
-  'Call whoami first and use it to tailor answers. Look things up (search_notes, recent_sessions, get_schedule) before asking them something their notes might answer.',
+  'Call whoami first and use it to tailor answers. Look things up (search_notes, recent_sessions, get_schedule) before asking them something their notes might answer; related_notes follows links from a note to connected projects, courses, sessions and ideas.',
   'At the end of a real work or study session, call log_session so it lands in their notes.',
 ].join(' ');
 

@@ -189,7 +189,8 @@ curl -X POST "https://YOUR_SITE/api/ingest/transcripts?source=codex" \
 other AI apps can look you up instead of you re-explaining yourself. It runs as you (the owner) and offers:
 
 - **Your notes vault** (a read-only copy the notes bridge keeps up to date): `whoami` (your "About Me" note plus
-  the current time), `search_notes`, `read_note`, `list_notes`, `recent_sessions`.
+  the current time), `search_notes`, `read_note`, `list_notes`, `recent_sessions`, and `related_notes`, which
+  follows `[[links]]` both ways (what a note links to, and every note that links to it).
 - **Your dashboard**: overview, tasks, schedule, free time, projects, habits, wishlist, garage, recipes, places to
   eat. The only writes are `create_task` and `log_session` (sends the conversation to Sessions, above). Nothing
   can be edited or deleted through it.
