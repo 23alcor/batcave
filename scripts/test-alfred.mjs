@@ -10,6 +10,20 @@ const request = (path, body, token = 'test-token') => new Request('https://test.
   method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
 });
 
+test('preview visitors cannot call Alfred, including when the local owner bypass is enabled', async (t) => {
+  const upstream = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Preview must not call the model'); });
+  const env = { DEV_BYPASS: '1', OPENAI_API_KEY: 'mock', DB: { prepare() { throw new Error('Preview chat must not access data'); } } };
+  for (const path of ['/api/chat', '/api/chat/']) {
+    const response = await worker.fetch(new Request('https://test.invalid' + path, {
+      method: 'POST', headers: { cookie: 'bc_demo=1', 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Add a task' }] }),
+    }), env);
+    assert.equal(response.status, 403);
+    assert.match((await response.json()).error, /preview/);
+  }
+  assert.equal(upstream.mock.callCount(), 0);
+});
+
 for (const entry of ['chat', 'todo']) test(`Alfred categorizes tasks and uses Other through ${entry}`, async (t) => {
   const projects = [
     { id: 'ml', name: 'EECE 448 Applied Machine Learning', short_name: 'EECE 448' },
@@ -288,4 +302,70 @@ test('Alfred adds and removes recipes through the shared Worker handlers', async
   assert.equal(data.changed, true);
   assert.deepEqual(data.actions, ['Added recipe: Lentil soup', 'Removed recipe: Lentil soup']);
   assert.equal(recipes.size, 0);
+});
+
+test('Alfred manages restaurants and dated visits through the shared Eating Out handlers', async (t) => {
+  const mutations = [];
+  const env = { DEV_BYPASS: '1', OPENAI_API_KEY: 'mock', DB: { prepare(sql) {
+    let args;
+    return { bind(...values) { args = values; return this; },
+      async first() { return 'shared-list'; },
+      async all() {
+        if (sql.startsWith('SELECT * FROM places')) return { results: [{ id: 'place', name: 'Kyan' }] };
+        if (sql.includes('FROM place_dishes')) return { results: [{ id: 'dish', place_id: 'place', name: 'Coffee', day: '2026-11-01' }] };
+        return { results: [{ uid: 0 }] };
+      },
+      async run() { mutations.push({ sql, args }); return { meta: { changes: 1 } }; },
+    };
+  }, async batch(statements) { return Promise.all(statements.map(s => s.run())); } } };
+  let round = 0;
+  t.mock.method(globalThis, 'fetch', async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    assert.ok(body.tools.some(tool => tool.name === 'manage_restaurant'));
+    if (round++ === 0) return json({ output: [
+      call('list_eating_out', {}, 'list'),
+      call('manage_restaurant', { action: 'add', name: 'Cafe', cuisine: 'Coffee' }, 'add'),
+      call('manage_restaurant', { action: 'edit', place_id: 'place', area: 'Bronx' }, 'edit'),
+      call('manage_dish', { action: 'add', place_id: 'place', name: 'Tea', date: '2026-11-02' }, 'visit'),
+      call('manage_dish', { action: 'edit', dish_id: 'dish', date: '2026-11-03' }, 'date'),
+      call('manage_dish', { action: 'edit', dish_id: 'dish', date: '2026-02-30' }, 'invalid'),
+      call('manage_dish', { action: 'remove', dish_id: 'foreign' }, 'foreign'),
+      call('manage_dish', { action: 'remove', dish_id: 'dish' }, 'remove'),
+      call('manage_restaurant', { action: 'remove', place_id: 'place' }, 'delete'),
+    ] });
+    const outputs = body.input.filter(x => x.type === 'function_call_output').map(x => JSON.parse(x.output));
+    assert.match(outputs[5].error, /valid date/);
+    assert.match(outputs[6].error, /not found/);
+    return json({ output: [message('Updated Eating Out.')] });
+  });
+  const response = await worker.fetch(new Request('https://test.invalid/api/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'Manage my restaurants and visit dates' }] }) }), env);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).actions.length, 6);
+  assert.equal(mutations.length, 7);
+  assert.ok(mutations.some(x => x.args.includes('2026-11-03')));
+});
+
+test('Alfred retains task date and calendar add/edit/remove tools', async (t) => {
+  const writes = [];
+  let round = 0;
+  const lib = { localNow: () => ({ date: '2026-11-06', time: '12:00' }), google: {
+    state: async () => ({ connected: true }),
+    createEvent: async (_env, args) => { writes.push(['add', args]); return { summary: 'Added event' }; },
+    updateEvent: async (_env, args) => { writes.push(['edit', args]); return { summary: 'Moved event' }; },
+    cancelEvent: async (_env, args) => { writes.push(['remove', args]); return { summary: 'Removed event' }; },
+  } };
+  t.mock.method(globalThis, 'fetch', async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    assert.ok(body.tools.find(x => x.name === 'update_task').parameters.properties.clear_due_date);
+    if (round++ === 0) return json({ output: [
+      call('create_event', { title: 'Dinner', date: '2026-11-07', start_time: '18:00' }, 'add'),
+      call('update_event', { event_id: 'event', calendar_id: 'calendar', date: '2026-11-08' }, 'edit'),
+      call('cancel_event', { event_id: 'event', calendar_id: 'calendar' }, 'remove'),
+    ] });
+    return json({ output: [message('Updated the calendar.')] });
+  });
+  const response = await chat(request('/api/chat', { messages: [{ role: 'user', content: 'Add, move and remove my dinner event' }] }), { OPENAI_API_KEY: 'mock' }, lib);
+  assert.equal((await response.json()).actions.length, 3);
+  assert.deepEqual(writes.map(x => x[0]), ['add', 'edit', 'remove']);
+  assert.equal(writes[1][1].date, '2026-11-08');
 });

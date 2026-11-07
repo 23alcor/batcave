@@ -1,6 +1,7 @@
 // Batcave front end — vanilla JS, hash routing, talks to /api/*.
 // window.__CFG (name, assistant, time zone…) is filled in by the Worker from wrangler.jsonc vars.
 import { temperature, weatherInfo, weatherIcon } from './weather.js';
+import { setupPlaceMap, setupPlacePhotos } from './place-map.js';
 const CFG = { app: 'Batcave', owner: '', assistant: 'Alfred', tz: 'America/New_York', ...(window.__CFG || {}) };
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -238,9 +239,9 @@ function projectsHtml(list, title, all = false) {
 }
 function taskRow(t) {
   const wn = when(t);
-  return `<label class="row"><input type="checkbox" class="check" data-action="done" data-id="${esc(t.id)}">
+  return `<div class="row"><input type="checkbox" class="check" data-action="done" data-id="${esc(t.id)}" aria-label="Mark ${esc(t.title)} done">
     <span class="grow">${esc(t.title)}${t.project ? `<span class="meta">${esc(t.project)}</span>` : ''}</span>
-    <span class="when ${wn.cls}">${esc(wn.text)}</span></label>`;
+    <span class="when ${wn.cls}">${esc(wn.text)}</span><button class="btn small" data-action="task-edit" data-id="${esc(t.id)}">Edit</button></div>`;
 }
 function habitsHtml(habits, title = 'Daily', weekly = null) {
   const done = habits.filter((h) => h.done).length;
@@ -476,7 +477,7 @@ async function viewInbox(view) {
     <section class="card">${tasks.length ? tasks.map((t) => `<div class="row"><input type="checkbox" class="check" data-action="done" data-id="${esc(t.id)}" aria-label="Mark ${esc(t.title)} done">
       <span class="grow">${esc(t.title)}<span class="meta">${esc(t.project || 'Other')}</span>${t.notes ? `<span class="meta">${esc(t.notes)}</span>` : ''}</span>
       ${t.due_at ? `<span class="when muted">${esc(fmtDay(t.due_at.slice(0, 10), { month: 'short', day: 'numeric' }))}</span>` : ''}
-      <button class="btn small" data-action="to-task" data-id="${esc(t.id)}">Make task</button></div>`).join('') : '<div class="empty">Inbox zero.</div>'}</section>`;
+      <button class="btn small" data-action="task-edit" data-inbox="1" data-id="${esc(t.id)}">Edit</button><button class="btn small" data-action="to-task" data-id="${esc(t.id)}">Make task</button></div>`).join('') : '<div class="empty">Inbox zero.</div>'}</section>`;
 }
 async function viewProjects(view) {
   const { projects } = await api('/api/projects');
@@ -624,50 +625,88 @@ $('#recipe-remove').onclick = async () => {
   finally { buttons.forEach((b) => { b.disabled = false; }); delete dlg.dataset.busy; }
 };
 
+function wishMediaFields(item = {}) {
+  return `<label>Links (one per line)<textarea class="input" name="links" rows="2" placeholder="https://…">${esc((item.links || []).join('\n'))}</textarea></label>
+    <label>Image URLs (one per line)<textarea class="input" name="image_urls" rows="2" placeholder="https://…">${esc((item.images || []).filter(i => !i.startsWith('data:')).join('\n'))}</textarea></label>
+    ${(item.images || []).filter(i => i.startsWith('data:')).map(i => `<label class="wish-keep"><input type="checkbox" name="keep_image" value="${esc(i)}" checked><img src="${esc(i)}" alt="Saved image" loading="lazy">Keep image</label>`).join('')}
+    <label>Add images<input class="input" type="file" name="uploads" accept="image/png,image/jpeg,image/webp,image/gif" multiple><span class="meta">Up to 6 images, 500 KB total. Use image URLs for larger files.</span></label>`;
+}
 const WISH_STATUSES = ['Searching', 'Waiting for discount', 'Saving money', 'Bought', 'Gave up'];
 async function viewWishlist(view) {
-  const { items } = await api('/api/wishlist');
+  const { items, members, own } = await api('/api/wishlist');
   const f = state.wishFilter;
   const shown = items.filter((i) => f === 'All' || i.status === f);
   const cats = [...new Set(shown.map((i) => i.category || 'Other'))].sort();
   view.innerHTML = `
-    <header class="head"><div><h1>Wishlist</h1><div class="sub">${items.filter((i) => !['Bought', 'Gave up'].includes(i.status)).length} things you want</div></div></header>
+    <header class="head sharing-head"><div><h1>Wishlist</h1><div class="sub">${items.filter((i) => !['Bought', 'Gave up'].includes(i.status)).length} things you want · ${members.length ? 'shared with ' + members.map(esc).join(', ') : 'private'}</div></div></header>
     <section class="card"><form class="form-row" data-form="add-wish"><label class="sr" for="w-n">Item</label><input id="w-n" class="input" name="name" placeholder="Add something…" required>
       <label class="sr" for="w-c">Category</label><input id="w-c" class="input" name="category" placeholder="Category" list="wish-cats" style="flex:0 1 180px"><datalist id="wish-cats">${[...new Set(items.map((i) => i.category).filter(Boolean))].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
-      <label class="sr" for="w-p">Price</label><input id="w-p" class="input" name="price" inputmode="decimal" placeholder="Price" style="flex:0 1 110px"><button class="btn primary">Add</button></form></section>
+      <label class="sr" for="w-p">Price</label><input id="w-p" class="input" name="price" inputmode="decimal" placeholder="Price" style="flex:0 1 110px"><button class="btn primary">Add</button><details class="wish-media"><summary>Add images and links</summary><div class="wish-fields">${wishMediaFields()}</div></details></form></section>
     <section class="card"><div class="chips" role="group" aria-label="Status" style="margin-bottom:6px">${[...WISH_STATUSES, 'All'].map((s) => `<button class="chip${f === s ? ' on' : ''}" data-action="wish-filter" data-filter="${esc(s)}" aria-pressed="${f === s}">${esc(s)}</button>`).join('')}</div>
-      ${cats.map((c) => `<div class="group-title"><span>${esc(c)}</span><span>${shown.filter((i) => (i.category || 'Other') === c).length}</span></div>${shown.filter((i) => (i.category || 'Other') === c).map((i) => `<div class="row">
-        <span class="grow">${i.link ? `<a href="${esc(i.link)}" target="_blank" rel="noopener noreferrer">${esc(i.name)}</a>` : esc(i.name)}${i.notes ? `<span class="meta">${esc(i.notes)}</span>` : ''}</span>
+      ${cats.map((c) => `<div class="group-title"><span>${esc(c)}</span><span>${shown.filter((i) => (i.category || 'Other') === c).length}</span></div>${shown.filter((i) => (i.category || 'Other') === c).map((i) => `<div class="wish-item"><div class="row">
+        <span class="grow">${i.links?.length ? `<a href="${esc(i.links[0])}" target="_blank" rel="noopener noreferrer">${esc(i.name)}</a>` : esc(i.name)}${i.notes ? `<span class="meta">${esc(i.notes)}</span>` : ''}</span>
         <span class="when muted">${i.price != null ? '$' + Number(i.price).toLocaleString() : ''}</span>
-        <label class="sr" for="ws-${esc(i.id)}">Status</label><select id="ws-${esc(i.id)}" class="input" style="min-height:34px;flex:0 0 auto" data-action="wish-status" data-id="${esc(i.id)}" data-prev="${esc(i.status)}">${WISH_STATUSES.map((s) => `<option${s === i.status ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></div>`).join('')}`).join('') || '<div class="empty">Nothing here.</div>'}
-    </section>`;
+        <label class="sr" for="ws-${esc(i.id)}">Status</label><select id="ws-${esc(i.id)}" class="input" style="min-height:34px;flex:0 0 auto" data-action="wish-status" data-id="${esc(i.id)}" data-prev="${esc(i.status)}">${WISH_STATUSES.map((s) => `<option${s === i.status ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></div>
+        ${i.images?.length ? `<div class="wish-images">${i.images.map(src => `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer"><img src="${esc(src)}" alt="${esc(i.name)}" loading="lazy" referrerpolicy="no-referrer"></a>`).join('')}</div>` : ''}
+        ${i.links?.length ? `<div class="wish-links">${i.links.map((url, index) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(new URL(url).hostname)}${i.links.length > 1 ? ' · ' + (index + 1) : ''}</a>`).join('')}</div>` : ''}
+        <details><summary>Edit item, images and links</summary><form class="wish-fields" data-form="edit-wish" data-id="${esc(i.id)}">
+          <label>Item<input class="input" name="name" value="${esc(i.name)}" maxlength="300" required></label>
+          <label>Category<input class="input" name="category" value="${esc(i.category || '')}" maxlength="60"></label>
+          <label>Price<input class="input" name="price" value="${esc(i.price ?? '')}" type="number" min="0" step="any"></label>
+          ${wishMediaFields(i)}<button class="btn primary">Save</button></form></details></div>`).join('')}`).join('') || '<div class="empty">Nothing here.</div>'}
+    </section>
+    <details class="card sharing-settings"><summary>Sharing settings</summary><h2>${members.length ? 'Shared wishlist' : 'Share this wishlist'}</h2>
+      <p>${members.length ? `You and ${members.map(esc).join(', ')} can add and edit everything on this wishlist.` : 'This wishlist is private. Invite someone with a Batcave account to add and edit items together.'}</p>
+      <p class="muted">Wishlist sharing is separate from Eating Out. One wishlist is open at a time. Joining keeps your private wishlist saved.</p>
+      <div class="form-row"><button class="btn" data-action="wish-share">${members.length ? 'Invite another person' : 'Make a share code'}</button>${members.length || !own ? `<button class="btn" data-action="wish-leave">${own ? 'Stop sharing' : 'Return to my wishlist'}</button>` : ''}</div>
+      ${!members.length && own ? '<details style="margin-top:12px"><summary>Join someone’s wishlist</summary><p>Your private items stay in your own wishlist; they are not added to theirs.</p><form class="form-row" data-form="wish-join"><label class="sr" for="wish-code">Wishlist code</label><input id="wish-code" class="input" name="code" placeholder="Wishlist share code" required><button class="btn">Join wishlist</button></form></details>' : ''}
+    </details>`;
 }
 // ---------- eating out ----------
 const EAT_FILTERS = [['want', 'Want to go'], ['been', 'Been'], ['all', 'All']];
 async function viewEating(view) {
-  const { places, dishes, members } = await api('/api/eating');
+  const { places, dishes, members, today, photos_enabled } = await api('/api/eating');
   const f = state.eatFilter, shown = places.filter((p) => f === 'all' || p.status === f);
   const day = (d) => esc(fmtDay(d, { month: 'short', day: 'numeric', year: 'numeric' }));
   view.innerHTML = `
-    <header class="head"><div><h1>Eating out</h1><div class="sub">${places.filter((p) => p.status === 'want').length} to try · ${places.filter((p) => p.status === 'been').length} been${members.length ? ` · shared with ${members.map(esc).join(', ')}` : ''}</div></div></header>
+    <header class="head sharing-head"><div><h1>Eating out</h1><div class="sub">${places.filter((p) => p.status === 'want').length} to try · ${places.filter((p) => p.status === 'been').length} been${members.length ? ` · shared with ${members.map(esc).join(', ')}` : ''}</div></div></header>
+    <dialog class="place-picker" id="place-picker" aria-labelledby="place-picker-title">
+      <div class="card-head"><h2 id="place-picker-title">Add an address</h2><button class="btn small" type="button" data-map-close aria-label="Close address search">Close</button></div>
+      <form class="form-row"><label class="sr" for="place-query">Business name or address</label><input id="place-query" class="input" name="query" placeholder="Business name, or name + city" minlength="2" maxlength="200" required><button class="btn primary" type="submit">Search</button><button class="btn" type="button" data-map-nearby>Near me</button></form>
+      <p class="place-map-status muted" data-map-status role="status">Loading map…</p>
+      <div class="place-map" data-place-map aria-label="Business map"></div>
+      <div class="place-results" data-map-results aria-label="Search results"></div>
+      <p class="place-map-credit">Search by <a href="https://photon.komoot.io/" target="_blank" rel="noopener noreferrer">Photon</a> and <a href="https://data.cityofnewyork.us/Health/DOHMH-New-York-City-Restaurant-Inspection-Results/43nn-pn8j" target="_blank" rel="noopener noreferrer">NYC Open Data</a> · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener noreferrer">Report a map issue</a></p>
+    </dialog>
     <section class="card"><form class="form-row" data-form="add-place"><label class="sr" for="pl-n">Place</label><input id="pl-n" class="input" name="name" placeholder="Add a place…" required>
       <label class="sr" for="pl-c">Cuisine</label><input id="pl-c" class="input" name="cuisine" placeholder="Cuisine" list="eat-cuisines" style="flex:0 1 160px"><datalist id="eat-cuisines">${[...new Set(places.map((p) => p.cuisine).filter(Boolean))].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
       <label class="sr" for="pl-a">Area</label><input id="pl-a" class="input" name="area" placeholder="Area" style="flex:0 1 160px">
       <label class="sr" for="pl-s">Status</label><select id="pl-s" class="input" name="status" style="flex:0 1 140px"><option value="want">Want to go</option><option value="been">Been</option></select>
-      <button class="btn primary">Add</button></form></section>
+      <button class="btn" type="button" data-map-open aria-haspopup="dialog" aria-controls="place-picker">Add address</button><button class="btn primary">Add</button></form><p class="place-picked muted" data-map-picked role="status"></p></section>
     <div class="chips" role="group" aria-label="Show">${EAT_FILTERS.map(([v, label]) => `<button class="chip${f === v ? ' on' : ''}" data-action="eat-filter" data-filter="${v}" aria-pressed="${f === v}">${label}</button>`).join('')}</div>
     ${shown.length ? `<div class="grid-auto">${shown.map((p) => `<section class="card">
+      ${photos_enabled ? `<figure class="place-photo" data-place-photo="${esc(p.id)}" aria-label="${esc(p.name)} photo"><span class="place-photo-empty">Business photo</span></figure>` : ''}
       <div class="card-head"><div><h2>${esc(p.name)}</h2>${p.cuisine || p.area ? `<div class="muted" style="font-size:13px">${[p.cuisine, p.area].filter(Boolean).map(esc).join(' · ')}</div>` : ''}</div>
         <label class="sr" for="ps-${esc(p.id)}">Status</label><select id="ps-${esc(p.id)}" class="input" style="min-height:34px;flex:0 0 auto;width:auto" data-action="place-status" data-id="${esc(p.id)}" data-prev="${esc(p.status)}"><option value="want"${p.status === 'want' ? ' selected' : ''}>Want to go</option><option value="been"${p.status === 'been' ? ' selected' : ''}>Been</option></select></div>
-      ${dishes.filter((d) => d.place_id === p.id).map((d) => `<div class="row"><span class="grow">${esc(d.name)}${d.notes ? `<span class="meta">${esc(d.notes)}</span>` : ''}</span><span class="when muted">${d.day ? day(d.day) : ''}</span></div>`).join('') || (p.status === 'been' ? '<div class="muted">No dishes logged yet.</div>' : '')}
+      ${p.address ? `<p class="place-address muted">${esc(p.address)}</p>` : ''}
+      <details class="eat-details"><summary>Edit place</summary><form class="form-row eat-edit" data-form="edit-place" data-id="${esc(p.id)}">
+        <label>Name<input class="input" name="name" value="${esc(p.name)}" maxlength="300" required></label><label>Cuisine<input class="input" name="cuisine" value="${esc(p.cuisine || '')}" maxlength="60"></label>
+        <label>Area<input class="input" name="area" value="${esc(p.area || '')}" maxlength="120"></label><label>Address<input class="input" name="address" value="${esc(p.address || '')}" maxlength="500"></label>
+        <button class="btn primary">Save</button><button class="btn red" type="button" data-action="eat-place-remove" data-id="${esc(p.id)}">Remove place</button></form></details>
+      ${dishes.filter((d) => d.place_id === p.id).map((d) => `<div class="eat-dish"><div class="row"><span class="grow">${esc(d.name)}${d.notes ? `<span class="meta">${esc(d.notes)}</span>` : ''}</span><span class="when muted">${d.day ? day(d.day) : ''}</span><button class="btn small" data-action="eat-dish-edit" data-id="${esc(d.id)}" aria-label="Edit ${esc(d.name)} and date">Edit</button></div>
+        <form class="form-row eat-edit" id="dish-edit-${esc(d.id)}" data-form="edit-dish" data-id="${esc(d.id)}" hidden><label>Dish<input class="input" name="name" value="${esc(d.name)}" maxlength="300" required></label><label>Notes<input class="input" name="notes" value="${esc(d.notes || '')}" maxlength="2000"></label><label>Date<input class="input" type="date" name="day" value="${esc(d.day || today)}" required></label><button class="btn primary">Save</button><button class="btn" type="button" data-action="eat-dish-edit" data-id="${esc(d.id)}">Cancel</button><button class="btn red" type="button" data-action="eat-dish-remove" data-id="${esc(d.id)}">Remove dish</button></form></div>`).join('') || (p.status === 'been' ? '<div class="muted">No dishes logged yet.</div>' : '')}
       <form class="form-row" data-form="add-dish" data-id="${esc(p.id)}" data-status="${esc(p.status)}" style="margin-top:10px"><label class="sr" for="dn-${esc(p.id)}">Dish</label><input id="dn-${esc(p.id)}" class="input" name="name" placeholder="What did you eat?" required>
-        <label class="sr" for="dt-${esc(p.id)}">Notes</label><input id="dt-${esc(p.id)}" class="input" name="notes" placeholder="Notes"><button class="btn">Log</button></form>
+        <label class="sr" for="dt-${esc(p.id)}">Notes</label><input id="dt-${esc(p.id)}" class="input" name="notes" placeholder="Notes"><label class="eat-date">Date<input class="input" type="date" name="day" value="${esc(today)}" required></label><button class="btn">Log</button></form>
     </section>`).join('')}</div>` : '<section class="card"><div class="empty">Nothing here.</div></section>'}
-    <section class="card"><h2 style="margin-bottom:6px">Share this list</h2>
-      <p class="muted" style="margin:0 0 10px">${members.length ? `You and ${members.map(esc).join(', ')} see the same places and dishes.` : 'Make a one-time code and send it to someone with an account here. When they enter it, you both see the same list.'}</p>
-      <div class="form-row"><button class="btn" data-action="eat-share">Make a share code</button>${members.length ? '<button class="btn" data-action="eat-leave">Leave shared list</button>' : ''}</div>
-      <form class="form-row" data-form="eat-join" style="margin-top:10px"><label class="sr" for="eat-code">Share code</label><input id="eat-code" class="input" name="code" placeholder="Got a code? e.g. ABCD-EFGH" autocapitalize="characters" required><button class="btn">Join</button></form>
-    </section>`;
+    <details class="card sharing-settings"><summary>Sharing settings</summary><h2 style="margin-bottom:6px">Share this list</h2>
+      <p class="muted" style="margin:0 0 10px">${members.length ? `You and ${members.map(esc).join(', ')} see and edit this entire Eating Out list. New codes invite more people to this same list.` : 'This Eating Out list is private. A one-time code lets someone with an account join it and edit the same places and dishes.'}</p>
+      <p class="muted">You have one Eating Out list at a time. Separate lists with different people are not supported. Sharing this list does not share your other tabs.</p>
+      <div class="form-row"><button class="btn" data-action="eat-share">${members.length ? 'Invite another person' : 'Make a share code'}</button>${members.length ? '<button class="btn" data-action="eat-leave">Leave shared list</button>' : ''}</div>
+      ${members.length ? '<p class="muted">To join a different list, leave this one first. Leaving keeps its places with the others and starts an empty private list.</p>' : '<details style="margin-top:12px"><summary>Join someone’s Eating Out list</summary><p>Your current places will move into their list and become visible to everyone on it.</p><form class="form-row" data-form="eat-join"><label class="sr" for="eat-code">Share code</label><input id="eat-code" class="input" name="code" placeholder="Eating Out share code" autocapitalize="characters" required><button class="btn">Join list</button></form></details>'}
+    </details>`;
+  const cleanupMap = setupPlaceMap($('#place-picker'), api, esc);
+  const cleanupPhotos = setupPlacePhotos(view, api, esc);
+  state.eatingCleanup = () => { cleanupMap(); cleanupPhotos(); };
 }
 async function viewSpending(view) {
   view.innerHTML = `<header class="head"><div><h1>Spending</h1><div class="sub">Budget, finance tracker and purchase planner</div></div></header>
@@ -744,6 +783,7 @@ async function viewSession(view, id) {
 // ---------- router ----------
 const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, sessions: viewSessions, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending, recipes: viewRecipes, eating: viewEating };
 async function render() {
+  state.eatingCleanup?.(); state.eatingCleanup = null;
   const [, page = '', arg] = location.hash.replace(/^#/, '').split('/');
   $$('.nav a, .tabbar a, .more-panel a').forEach((a) => { const p = a.getAttribute('href').replace(/^#\//, ''); if (p === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   $('#tab-more').classList.toggle('on', ['projects', 'sessions', 'garage', 'wishlist', 'spending', 'recipes', 'eating'].includes(page));
@@ -817,6 +857,18 @@ document.addEventListener('click', async (ev) => {
   if (!el) return;
   const a = el.dataset.action;
   try {
+    if (a === 'task-edit') {
+      const { tasks } = await api('/api/tasks?view=' + (el.dataset.inbox ? 'inbox' : 'open'));
+      const task = tasks.find((t) => t.id === el.dataset.id);
+      if (task) { openTaskEditor(task, el); tkEditing.fromList = true; }
+    }
+    if (a === 'eat-dish-edit') { const form = $('#dish-edit-' + el.dataset.id); form.hidden = !form.hidden; }
+    if (a === 'eat-place-remove' || a === 'eat-dish-remove') {
+      if (!el.dataset.armed) { el.dataset.armed = '1'; el.textContent = a === 'eat-place-remove' ? 'Confirm removal with dish history' : 'Confirm removal'; return; }
+      el.disabled = true;
+      try { await api('/api/eating/' + (a === 'eat-dish-remove' ? 'dishes/' : '') + el.dataset.id, { method: 'DELETE' }); toast('Removed'); await render(); }
+      finally { el.disabled = false; }
+    }
     if (a === 'weather-retry') await loadWeather();
     if (a === 'recipe-add') openRecipe();
     if (a === 'recipe-view' || a === 'recipe-edit') {
@@ -878,10 +930,16 @@ document.addEventListener('click', async (ev) => {
       rerender();
     }
     if (a === 'wish-filter') { state.wishFilter = el.dataset.filter; render(); }
-    if (a === 'eat-share') {
-      const { code } = await api('/api/eating/share', { method: 'POST' });
-      await navigator.clipboard?.writeText(code).catch(() => {});
-      el.textContent = `Code: ${code} (copied)`;
+    if (a === 'eat-share' || a === 'wish-share') {
+      const { code } = await api(a === 'eat-share' ? '/api/eating/share' : '/api/wishlist/share', { method: 'POST' });
+      let copied = false;
+      try { await navigator.clipboard.writeText(code); copied = true; } catch {}
+      el.textContent = `Code: ${code}${copied ? ' (copied)' : ''}`;
+    }
+    if (a === 'wish-leave') {
+      if (!el.dataset.armed) { el.dataset.armed = '1'; el.textContent = 'Confirm? Everyone keeps their own wishlist'; setTimeout(() => { if (el.isConnected) { delete el.dataset.armed; render(); } }, 4000); return; }
+      await api('/api/wishlist/leave', { method: 'POST' });
+      toast('Your own wishlist is open.'); render();
     }
     if (a === 'eat-leave') {
       if (!el.dataset.armed) { el.dataset.armed = '1'; el.textContent = 'Leave? The shared places stay with the others'; setTimeout(() => { if (el.isConnected) { delete el.dataset.armed; el.textContent = 'Leave shared list'; } }, 4000); return; }
@@ -910,6 +968,12 @@ document.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const f = Object.fromEntries(new FormData(form));
   try {
+    if (form.dataset.form === 'edit-place' || form.dataset.form === 'edit-dish') {
+      const button = $('button[type="submit"], button:not([type])', form); button.disabled = true;
+      try { await api('/api/eating/' + (form.dataset.form === 'edit-dish' ? 'dishes/' : '') + form.dataset.id, { method: 'PATCH', body: f }); toast('Saved'); await render(); }
+      finally { button.disabled = false; }
+      return;
+    }
     if (form.dataset.form === 'add-project') {
       const button = $('button', form);
       button.disabled = true;
@@ -938,13 +1002,18 @@ document.addEventListener('submit', async (ev) => {
     if (form.dataset.form === 'add-task') await api('/api/tasks', { method: 'POST', body: { title: f.title, project_id: f.project_id || null, due_at: f.due || null } });
     if (form.dataset.form === 'add-inbox') await api('/api/tasks', { method: 'POST', body: { title: f.title, kind: 'inbox' } });
     if (form.dataset.form === 'add-log') await api('/api/garage/logs', { method: 'POST', body: f });
+    if (form.dataset.form === 'wish-join') {
+      await api('/api/wishlist/join', { method: 'POST', body: f });
+      toast('Shared wishlist is open. Your private items are saved.'); return render();
+    }
     if (form.dataset.form === 'eat-join') {
       await api('/api/eating/join', { method: 'POST', body: f });
       toast('Joined. You now share this list.');
       return render();
     }
     if (form.dataset.form === 'add-place') {
-      await api('/api/eating', { method: 'POST', body: f });
+      const location = form.dataset.latitude !== undefined ? { latitude: +form.dataset.latitude, longitude: +form.dataset.longitude, address: form.dataset.address } : {};
+      await api('/api/eating', { method: 'POST', body: { ...f, ...location } });
       if (state.eatFilter !== 'all') state.eatFilter = f.status; // show the list the new place landed in
     }
     if (form.dataset.form === 'add-dish') {
@@ -955,7 +1024,19 @@ document.addEventListener('submit', async (ev) => {
       remember(`Logged ${f.name}`, undo, redo);
       return render();
     }
-    if (form.dataset.form === 'add-wish') await api('/api/wishlist', { method: 'POST', body: f });
+    if (['add-wish', 'edit-wish'].includes(form.dataset.form)) {
+      const button = $('button:not([type]), button[type="submit"]', form); button.disabled = true;
+      try {
+        const lines = value => (value || '').split('\n').map(s => s.trim()).filter(Boolean);
+        const data = new FormData(form), files = data.getAll('uploads').filter(file => file.size);
+        if (files.some(file => !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) || files.reduce((n, file) => n + file.size, 0) > 500000) throw new Error('Choose PNG, JPEG, WebP or GIF images under 500 KB total, or use image URLs.');
+        const uploads = await Promise.all(files.map(file => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Could not read image')); reader.readAsDataURL(file); })));
+        const payload = { name: f.name, category: f.category, price: f.price, links: lines(f.links), images: [...data.getAll('keep_image'), ...lines(f.image_urls), ...uploads] };
+        const edit = form.dataset.form === 'edit-wish';
+        await api('/api/wishlist' + (edit ? '/' + form.dataset.id : ''), { method: edit ? 'PATCH' : 'POST', body: payload });
+        toast(edit ? 'Saved' : 'Added'); return render();
+      } finally { button.disabled = false; }
+    }
     if (form.dataset.form === 'add-habit') {
       const r = await api('/api/habits', { method: 'POST', body: { name: f.name, cadence: f.cadence || 'daily' } });
       if (r.existed) { toast(`${r.name} is already on your ${r.cadence} list`); return; }
@@ -1037,6 +1118,7 @@ function renderChat() {
   $('#chat-send').disabled = chat.busy;
 }
 function openChat(open = true) {
+  if (CFG.role === 'demo') return;
   const panel = $('#chat');
   panel.hidden = !open;
   showLayoutMenu(false);
@@ -1217,6 +1299,7 @@ window.addEventListener('resize', applyLayout);
 matchMedia('(max-width: 820px)').addEventListener('change', applyLayout);
 applyLayout();
 async function sendChat(text) {
+  if (CFG.role === 'demo') return;
   text = text.trim();
   if (!text || chat.busy) return;
   chat.messages.push({ role: 'user', content: text });
@@ -1730,8 +1813,8 @@ function openTaskEditor(t, anchor) {
   pop.dataset.state = t.state;
   $('#tk-meta').textContent = ['Task', t.project, t.state === 'overdue' ? 'overdue' : t.state === 'today' ? 'due today' : ''].filter(Boolean).join(' · ');
   tkField('title').value = t.title;
-  tkField('date').value = t.due_at.slice(0, 10);
-  tkField('time').value = t.due_at.length > 10 ? t.due_at.slice(11, 16) : '';
+  tkField('date').value = t.due_at?.slice(0, 10) || '';
+  tkField('time').value = t.due_at?.length > 10 ? t.due_at.slice(11, 16) : '';
   tkField('notes').value = t.notes || '';
   pop.hidden = false;
   positionPop(pop, anchor);
@@ -1740,11 +1823,11 @@ function closeTaskEditor() { const pop = $('#tk-pop'); if (pop) pop.hidden = tru
 $('#tk-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   if (!tkEditing) return;
-  const { t } = tkEditing;
+  const { t, fromList } = tkEditing;
   const title = tkField('title').value.trim(), date = tkField('date').value, time = tkField('time').value, notes = tkField('notes').value.trim();
   if (!title) { tkField('title').focus(); return; }
-  if (!date) { tkField('date').focus(); return; }
-  const due = time ? `${date}T${time}` : date;
+  if (time && !date) { tkField('date').focus(); return; }
+  const due = date ? (time ? `${date}T${time}` : date) : null;
   const after = {}, before = {};
   if (title !== t.title) { after.title = title; before.title = t.title; }
   if (due !== t.due_at) { after.due_at = due; before.due_at = t.due_at; }
@@ -1755,8 +1838,8 @@ $('#tk-form').addEventListener('submit', async (ev) => {
     await patchTask(t.id, after);
     remember(`Updated ${title}${after.due_at ? ` · ${shortDay(date)}${time ? ' ' + fmtTime(time) : ''}` : ''}`, () => patchTask(t.id, before), () => patchTask(t.id, after));
   } catch (err) { toast(err.message); }
-  await reloadWeek();
-  refreshDash().catch(() => {});
+  if (fromList) { await refreshDash(); await render(); }
+  else { await reloadWeek(); refreshDash().catch(() => {}); }
 });
 $('#tk-pop').addEventListener('click', (ev) => {
   const b = ev.target.closest('[data-tkp]');

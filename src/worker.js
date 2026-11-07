@@ -11,6 +11,9 @@ export { UserDB } from './userdb.js';
 import { summarizePending, transcriptsApi, transcriptsIngest } from './transcripts.js';
 import { OAUTH_PATH, mcp, oauthProvider, vaultIngest } from './mcp.js';
 import { weather } from './weather.js';
+import { searchPlaces } from './place-search.js';
+import { placePhoto } from './place-photos.js';
+import { wishlist, wishlistDB } from './wishlist.js';
 
 
 // ---------- helpers ----------
@@ -27,8 +30,8 @@ export function localNow(d = new Date()) {
   return { date: `${g('year')}-${g('month')}-${g('day')}`, time: `${hh}:${g('minute')}` };
 }
 export const addDays = (day, n) => { const d = new Date(day + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
-const isDue = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(s);
+const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && Number.isFinite(Date.parse(s + 'T12:00:00Z')) && new Date(s + 'T12:00:00Z').toISOString().slice(0, 10) === s;
+const isDue = (s) => typeof s === 'string' && isDay(s.slice(0, 10)) && /^(T([01]\d|2[0-3]):[0-5]\d)?$/.test(s.slice(10));
 const str = (v, max = 500) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 
 async function body(req) {
@@ -147,7 +150,7 @@ async function dashboard(env) {
   const habits = allHabits.filter((h) => h.cadence !== 'weekly').map((h) => ({ id: h.id, name: h.name, done: h.done }));
   const weekly = allHabits.filter((h) => h.cadence === 'weekly').map((h) => ({ id: h.id, name: h.name, done: h.week_day ? 1 : 0, done_day: h.week_day || null }));
   const { results: vehicles } = await env.DB.prepare('SELECT id, name, plate, mileage FROM vehicles ORDER BY name').all();
-  const counts = await env.DB.prepare(
+  const counts = await (await wishlistDB(env)).prepare(
     `SELECT (SELECT COUNT(*) FROM wishlist WHERE status NOT IN ('Bought','Gave up')) AS wishlist_open`
   ).first();
   const slim = (t) => ({ id: t.id, title: t.title, project: t.project, due_at: t.due_at, date_tbd: t.date_tbd, days: daysBetween(today, t.due_at.slice(0, 10)) });
@@ -398,7 +401,7 @@ async function eatMembers(db, space) {
   return uids;
 }
 async function eating(req, env, path, m) {
-  if (env.UID === 'demo') return m === 'GET' && path === '/api/eating' ? json({ places: [], dishes: [], members: [] }) : bad('not found', 404);
+  if (env.UID === 'demo') return m === 'GET' && path === '/api/eating' ? json({ places: [], dishes: [], members: [], today: localNow().date }) : bad('not found', 404);
   const db = env.D1 || env.DB, uid = env.UID, space = await eatSpace(db, uid);
   const inSpace = (id) => db.prepare('SELECT status FROM places WHERE id = ?1 AND space = ?2').bind(id, space).first();
   let match;
@@ -408,15 +411,22 @@ async function eating(req, env, path, m) {
     const others = (await eatMembers(db, space)).filter((u) => u !== uid);
     const { results: names } = others.length ? await db.prepare(`SELECT id, name FROM users WHERE id IN (${others.map(() => '?').join(',')})`).bind(...others).all() : { results: [] };
     const members = others.map((u) => (u === 0 ? env.OWNER_NAME || 'Owner' : names.find((n) => n.id === u)?.name || 'Someone'));
-    return json({ places, dishes, members });
+    return json({ places, dishes, members, today: localNow().date, photos_enabled: !!env.GOOGLE_MAPS_API_KEY });
+  }
+  if ((match = path.match(/^\/api\/eating\/([\w-]+)\/photo$/)) && m === 'GET') {
+    const place = await db.prepare('SELECT * FROM places WHERE id = ?1 AND space = ?2').bind(match[1], space).first();
+    if (!place) return bad('place not found', 404);
+    return placePhoto(place, env, new URL(req.url).searchParams.get('street') === '1');
   }
   if (path === '/api/eating' && m === 'POST') {
     const b = await body(req);
     const name = str(b.name, 300);
     if (!name) return bad('name is required');
+    const located = b.latitude != null || b.longitude != null;
+    if (located && (!Number.isFinite(b.latitude) || Math.abs(b.latitude) > 90 || !Number.isFinite(b.longitude) || Math.abs(b.longitude) > 180)) return bad('Valid latitude and longitude are required together.');
     const id = newId();
-    await db.prepare('INSERT INTO places (id, name, cuisine, area, status, space) VALUES (?1, ?2, ?3, ?4, ?5, ?6)')
-      .bind(id, name, str(b.cuisine, 60) || null, str(b.area, 120) || null, b.status === 'been' ? 'been' : 'want', space).run();
+    await db.prepare('INSERT INTO places (id, name, cuisine, area, status, space, address, latitude, longitude) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)')
+      .bind(id, name, str(b.cuisine, 60) || null, str(b.area, 120) || null, b.status === 'been' ? 'been' : 'want', space, located ? str(b.address, 500) || null : null, located ? b.latitude : null, located ? b.longitude : null).run();
     return json({ id }, 201);
   }
   // Sharing: a one-time code lets someone else join your list. Joining brings your own places along if nobody else had them.
@@ -446,14 +456,29 @@ async function eating(req, env, path, m) {
   }
   if ((match = path.match(/^\/api\/eating\/([\w-]+)$/)) && m === 'PATCH') {
     const b = await body(req);
-    if (!['want', 'been'].includes(b.status)) return bad('status must be want or been');
-    const result = await db.prepare('UPDATE places SET status = ?1 WHERE id = ?2 AND space = ?3').bind(b.status, match[1], space).run();
+    const sets = [], values = [];
+    for (const [key, max] of Object.entries({ name: 300, cuisine: 60, area: 120, address: 500 })) {
+      if (!(key in b)) continue;
+      if (typeof b[key] !== 'string' || b[key].length > max || (key === 'name' && !b[key].trim())) return bad(`Invalid ${key}`);
+      sets.push(`${key} = ?${values.push(b[key].trim() || null)}`);
+    }
+    if ('status' in b) {
+      if (!['want', 'been'].includes(b.status)) return bad('status must be want or been');
+      sets.push(`status = ?${values.push(b.status)}`);
+    }
+    if (!sets.length) return bad('nothing to update');
+    const result = await db.prepare(`UPDATE places SET ${sets.join(', ')} WHERE id = ?${values.length + 1} AND space = ?${values.length + 2}`).bind(...values, match[1], space).run();
+    return result.meta.changes ? json({ ok: true }) : bad('place not found', 404);
+  }
+  if ((match = path.match(/^\/api\/eating\/([\w-]+)$/)) && m === 'DELETE') {
+    const result = await db.prepare('DELETE FROM places WHERE id = ?1 AND space = ?2').bind(match[1], space).run();
     return result.meta.changes ? json({ ok: true }) : bad('place not found', 404);
   }
   if ((match = path.match(/^\/api\/eating\/([\w-]+)\/dishes$/)) && m === 'POST') {
     const b = await body(req);
     const name = str(b.name, 300);
     if (!name) return bad('name is required');
+    if (b.day && !isDay(b.day)) return bad('day must be a valid date (YYYY-MM-DD)');
     if (!(await inSpace(match[1]))) return bad('place not found', 404);
     const id = newId();
     await db.batch([
@@ -464,8 +489,20 @@ async function eating(req, env, path, m) {
     return json({ id }, 201);
   }
   if ((match = path.match(/^\/api\/eating\/dishes\/([\w-]+)$/)) && m === 'DELETE') {
-    await db.prepare('DELETE FROM place_dishes WHERE id = ?1 AND place_id IN (SELECT id FROM places WHERE space = ?2)').bind(match[1], space).run();
-    return json({ ok: true });
+    const result = await db.prepare('DELETE FROM place_dishes WHERE id = ?1 AND place_id IN (SELECT id FROM places WHERE space = ?2)').bind(match[1], space).run();
+    return result.meta.changes ? json({ ok: true }) : bad('dish not found', 404);
+  }
+  if ((match = path.match(/^\/api\/eating\/dishes\/([\w-]+)$/)) && m === 'PATCH') {
+    const b = await body(req), sets = [], values = [];
+    for (const [key, max] of Object.entries({ name: 300, notes: 2000, day: 10 })) {
+      if (!(key in b)) continue;
+      if (typeof b[key] !== 'string' || b[key].length > max || (key === 'name' && !b[key].trim())) return bad(`Invalid ${key}`);
+      if (key === 'day' && !isDay(b.day)) return bad('day must be a valid date (YYYY-MM-DD)');
+      sets.push(`${key} = ?${values.push(b[key].trim() || null)}`);
+    }
+    if (!sets.length) return bad('nothing to update');
+    const result = await db.prepare(`UPDATE place_dishes SET ${sets.join(', ')} WHERE id = ?${values.length + 1} AND place_id IN (SELECT id FROM places WHERE space = ?${values.length + 2})`).bind(...values, match[1], space).run();
+    return result.meta.changes ? json({ ok: true }) : bad('dish not found', 404);
   }
   return bad('not found', 404);
 }
@@ -499,6 +536,7 @@ async function api(req, env, url, ctx) {
   const m = req.method;
   const path = url.pathname.replace(/\/+$/, '');
   let match;
+  if (path === '/api/eating/search' && m === 'GET') return searchPlaces(url, ctx);
   if (path === '/api/weather' && m === 'GET') return weather(url, ctx);
   if (path === '/api/recipes' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT * FROM recipes ORDER BY created_at DESC, rowid DESC').all();
@@ -552,25 +590,7 @@ async function api(req, env, url, ctx) {
     if (b.mileage && Number.isFinite(+b.mileage)) await env.DB.prepare('UPDATE vehicles SET mileage = ?1 WHERE id = ?2').bind(Math.round(+b.mileage), b.vehicle_id).run();
     return json({ id }, 201);
   }
-  if (path === '/api/wishlist' && m === 'GET') {
-    const { results } = await env.DB.prepare('SELECT * FROM wishlist ORDER BY created_at DESC').all();
-    return json({ items: results });
-  }
-  if (path === '/api/wishlist' && m === 'POST') {
-    const b = await body(req);
-    const name = str(b.name, 300);
-    if (!name) return bad('name is required');
-    const id = newId();
-    await env.DB.prepare('INSERT INTO wishlist (id, name, category, status, price, link) VALUES (?1, ?2, ?3, ?4, ?5, ?6)')
-      .bind(id, name, str(b.category, 60) || null, 'Searching', Number.isFinite(+b.price) && b.price !== '' ? +b.price : null, str(b.link, 2000) || null).run();
-    return json({ id }, 201);
-  }
-  if ((match = path.match(/^\/api\/wishlist\/([\w-]+)$/)) && m === 'PATCH') {
-    const b = await body(req);
-    if (!['Searching', 'Waiting for discount', 'Saving money', 'Bought', 'Gave up'].includes(b.status)) return bad('bad status');
-    await env.DB.prepare('UPDATE wishlist SET status = ?1, acquired_on = CASE WHEN ?1 = \'Bought\' THEN ?2 ELSE acquired_on END WHERE id = ?3').bind(b.status, localNow().date, match[1]).run();
-    return json({ ok: true });
-  }
+  if (path.startsWith('/api/wishlist')) return wishlist(req, env, path, m, localNow().date);
   if (path.startsWith('/api/eating')) return eating(req, env, path, m);
   return bad('not found', 404);
 }
@@ -613,10 +633,11 @@ async function manifest(env, req) {
 function personalize(res) {
   if (!(res.headers.get('content-type') || '').includes('text/html')) return res;
   // Read now: the handlers below run while the body streams, after this request's settings are gone.
-  const { app, tagline } = cfg;
+  const { app, tagline, role } = cfg;
   const ask = `Ask ${cfg.assistant}`;
   const json = JSON.stringify(publicConfig()).replace(/</g, '\\u003c');
   const out = new HTMLRewriter()
+    .on('body', { element(el) { if (role === 'demo') el.setAttribute('data-preview', ''); } })
     .on('title', { element(el) { el.setInnerContent(app); } })
     .on('meta[name="apple-mobile-web-app-title"]', { element(el) { el.setAttribute('content', app); } })
     .on('[data-cfg="app"]', { element(el) { el.setInnerContent(app); } })
@@ -633,7 +654,7 @@ function personalize(res) {
 }
 
 // What Alfred's tools call into (chat window and to-do API).
-const alfredLib = () => ({ dashboard, events, wakeConfig, setWake, weekStartOf, listTasks, createTask, updateTask, createProject, updateProject, saveRecipe, deleteRecipe, createHabit, updateHabit, localNow, addDays, bucket, google: { state: googleState, listCalendars, createEvent, updateEvent, cancelEvent, GoogleError } });
+const alfredLib = () => ({ dashboard, events, wakeConfig, setWake, weekStartOf, listTasks, wishlist, createTask, updateTask, createProject, updateProject, saveRecipe, deleteRecipe, eating, searchPlaces, createHabit, updateHabit, localNow, addDays, bucket, google: { state: googleState, listCalendars, createEvent, updateEvent, cancelEvent, GoogleError } });
 
 // POST /api/ingest/todo — JSON {text | title | name | task, notes?, due_at?, url?, source?, alfred?} or a plain-text body.
 // ?format=text answers with just Alfred's sentence (handy for a phone/Mac shortcut notification).
@@ -767,7 +788,7 @@ function asUser(env, user) {
   if (!user.id) return { env: { ...env, UID: 0 }, settings: {} };
   const { GCAL_ICS_URL, INGEST_TOKEN, ...shared } = env;
   return {
-    env: { ...shared, UID: user.id, DB: userDB(userStub(env, user.id)), D1: env.DB }, // D1 only for shared lists (eating out)
+    env: { ...shared, UID: user.id, DB: userDB(userStub(env, user.id)), D1: env.DB }, // D1 for shared list memberships
     settings: { owner: user.name, ownerFull: user.name, honorific: user.name, tz: user.timezone, tagline: '', role: 'friend' },
   };
 }
@@ -776,7 +797,7 @@ function asUser(env, user) {
 const DEMO_COOKIE = 'bc_demo';
 const isDemo = (req) => new RegExp(`(?:^|;\\s*)${DEMO_COOKIE}=1(?:;|$)`).test(req.headers.get('cookie') || '');
 async function demoEnv(env) {
-  const { GCAL_ICS_URL, INGEST_TOKEN, OPENAI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ...shared } = env;
+  const { GCAL_ICS_URL, INGEST_TOKEN, OPENAI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_MAPS_API_KEY, ...shared } = env;
   const DB = userDB(userStub(env, 'demo'));
   const today = new Date().toISOString().slice(0, 10); // UTC, like date('now') in demo.sql
   if ((await DB.prepare("SELECT value FROM meta WHERE key = 'demo:day'").first('value')) !== today) {

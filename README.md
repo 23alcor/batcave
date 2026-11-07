@@ -25,7 +25,8 @@ password. Name it, rename the assistant, and set your time zone in one config fi
 - **Projects page**: click **Edit** to add or delete projects. Deleting hides the project, keeps its tasks, and supports Undo / Redo.
 - **Daily page**: daily habits, weekly habits (done once each Sunday–Saturday week) and their history.
 - **Recipes page**: medium cards with an **Add recipe** card. Save a name, time, servings, ingredients and instructions; view or edit a recipe, or permanently remove it after confirmation. Alfred can find, read, add, edit and remove recipes from chat.
-- **Eating out page**: restaurants you want to try and ones you've been to, with cuisine and area. Log what you ate at each place (with notes); logging a dish moves the place to **Been**. Status changes and dish logs support Undo / Redo. To share one list with someone who has an account on your install, click **Make a share code** and send them the code; once they enter it you both see and edit the same places. **Leave shared list** gives you a fresh empty list and leaves the shared places with the others.
+- **Wishlist**: add and edit items with up to 10 links and 6 images (uploads under 500 KB total per item, or image URLs). **Sharing settings** hides invite and code-entry controls until expanded. Invite someone to edit the same wishlist. Joining preserves your private wishlist; **Return to my wishlist** restores it. The host can **Stop sharing** to return everyone to their own list. Wishlist and Eating Out sharing are independent.
+- **Eating out page**: click **Add address** in the new-place form to open map search, choose a business, and add it with its address and location. The map stays hidden until requested. When `GOOGLE_MAPS_API_KEY` is configured, cards load the first matched Google business photo with author credits, falling back to Street View at the saved address. Photos are fetched as cards become visible; Google photo references are never stored. **Near me** centers the map using your device location; adding a city to a search also narrows it down. Uses Leaflet, OpenStreetMap tiles, Photon search and NYC Open Data restaurant results without an API key; manual entry remains available. Restaurants you want to try and ones you've been to have cuisine and area. Edit place details or remove a place with its dish history. Log what you ate at each place (with notes and a date), then edit or remove any dish/visit. Alfred can add, edit and remove restaurants and dated dishes using the same shared-list permissions; logging a dish moves the place to **Been**. Status changes and dish logs support Undo / Redo. You have one active Eating Out list; separate simultaneous lists are not supported. Sharing affects only Eating Out. Open **Sharing settings**, then click **Make a share code** and send them the code; once they enter it you both see and edit the same places. **Leave shared list** gives you a fresh empty list and leaves the shared places with the others.
 - **Assistant** (bottom-left, press `/`): "what's overdue?", "move my dentist appointment to Friday at 3",
   "add laundry as a weekly habit". It uses OpenAI with tools over your data; recipe removal is permanent and requires an explicit request.
   Give it a vague to-do and it picks a sensible time from your free slots.
@@ -38,7 +39,7 @@ password. Name it, rename the assistant, and set your time zone in one config fi
 
 ## Quick start
 
-You need [Node.js 20+](https://nodejs.org) and a free [Cloudflare account](https://dash.cloudflare.com/sign-up).
+You need [Node.js 20+](https://nodejs.org) and a free [Cloudflare account](https://dash.cloudflare.com/sign-up). Running the SQLite-backed test suite requires Node.js 22.13+.
 
 ```bash
 git clone https://github.com/23alcor/batcave.git
@@ -80,6 +81,7 @@ Secrets are set with `npx wrangler secret put NAME` and never stored in the repo
 | `INGEST_TOKEN` | The to-do API, the Alfred command API and the Sessions API |
 | `MCP_TOKEN` | Optional: lets AI tools that take a header (Claude Code, Cursor, Codex) use the MCP server |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google Calendar sync |
+| `GOOGLE_MAPS_API_KEY` | Optional Eating Out business photos; enable Places API (New) and Street View Static API with billing |
 
 ## Keyboard shortcuts
 
@@ -320,3 +322,13 @@ examples/          Sample data for a new install
 ## License
 
 [MIT](LICENSE). Make it yours.
+
+### Eating Out business photos
+
+In a Google Maps Platform project with billing enabled, enable **Places API (New)** and **Street View Static API**. Create an API key restricted to those APIs, then save it as a Worker secret (not in source code):
+
+```sh
+npx wrangler secret put GOOGLE_MAPS_API_KEY
+```
+
+The cards enable photos once the secret is available. Local development can use the same variable in `.dev.vars`. Existing calendar OAuth credentials do not enable Maps photos. Provider usage can incur Google Maps Platform charges.

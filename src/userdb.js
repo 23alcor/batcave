@@ -1,6 +1,6 @@
 // Each friend's data lives in their own SQLite database: a Durable Object per user. The owner keeps using D1.
 // userDB() returns an object shaped like the D1 binding (prepare/bind/first/all/run/batch), so every handler
-// runs unchanged against either one, and one friend can never read another's rows.
+// runs against either one. Only explicit wishlist sharing resolves to another person's wishlist.
 import { DurableObject } from 'cloudflare:workers';
 import m1 from '../migrations/0001_init.sql';
 import m3 from '../migrations/0003_google.sql';
@@ -9,10 +9,11 @@ import m5 from '../migrations/0005_transcripts.sql';
 import m6 from '../migrations/0006_drop_links.sql';
 import m7 from '../migrations/0007_recipes.sql';
 import m9 from '../migrations/0009_eating_out.sql';
+import m12 from '../migrations/0012_wishlist_media.sql';
 
 // Per-user schema, applied in order. A new migration that changes per-user tables goes here too (append only).
 // 0002 (login lockout) and 0008 (accounts) are install-wide and stay in D1.
-const MIGRATIONS = [m1, m3, m4, m5, m6, m7, m9];
+const MIGRATIONS = [m1, m3, m4, m5, m6, m7, m9, m12];
 
 export class UserDB extends DurableObject {
   constructor(ctx, env) {

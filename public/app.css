@@ -656,6 +656,52 @@ dialog .set-row .input { flex: 0 1 240px; min-width: 0; }
 .set-btns { display: flex; gap: 6px; flex: none; }
 #set-friends-list .set-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 
+/* Eating out map */
+.place-picker { width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 20px; overflow: auto; }
+.place-picker form { padding: 0; flex-direction: row; flex-wrap: wrap; }
+.place-map { height: 340px; border-radius: 10px; background: var(--chip); isolation: isolate; z-index: 0; }
+.place-map-status { margin: 10px 0; font-size: 13px; }
+.place-results { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 8px; margin-top: 12px; }
+.place-result { display: flex; flex-direction: column; gap: 4px; text-align: left; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--card); color: var(--ink); font: inherit; cursor: pointer; min-width: 0; }
+.place-result span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.place-result[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.place-map-credit { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.place-picked, .place-address { margin: 10px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+.place-picked:empty { display: none; }
+.eat-details { margin: 12px 0; }
+.eat-details summary { cursor: pointer; color: var(--link); }
+.eat-edit { margin: 12px 0; align-items: end; }
+.eat-date + .btn { align-self: end; }
+.eat-edit[hidden] { display: none; }
+.eat-edit label, .eat-date { display: flex; flex: 1 1 140px; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.eat-dish { border-top: 1px solid var(--line2); }
+@media (max-width: 820px) { .place-map { height: 280px; } }
 /* Preview banner (/demo) */
+body[data-preview] #ask-btn, body[data-preview] #ask-fab, body[data-preview] #chat { display: none !important; }
 .demo-bar { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; padding: 8px 16px; padding-top: max(8px, env(safe-area-inset-top)); background: var(--accent-soft); color: var(--ink); border-bottom: 1px solid var(--line); font-size: 14px; text-align: center; }
 .demo-bar .btn { text-decoration: none; }
+
+.place-photo { margin: -18px -20px 16px; border-radius: var(--radius) var(--radius) 0 0; overflow: hidden; background: var(--chip); }
+.place-photo img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.place-photo-empty { display: grid; place-items: center; aspect-ratio: 16 / 9; color: var(--muted); font-size: 13px; }
+.place-photo figcaption { padding: 6px 12px; font-size: 12px; color: var(--muted); }
+.place-photo figcaption a { color: inherit; }
+@media (max-width: 820px) { .place-photo { margin: -16px -16px 16px; } }
+
+/* Wishlist attachments follow the existing compact list and form layout. */
+.wish-media { flex: 1 0 100%; }
+.wish-fields { display: grid; gap: 12px; margin: 12px 0; }
+.wish-fields label { display: grid; gap: 5px; min-width: 0; }
+.wish-fields .input { width: 100%; min-width: 0; }
+.wish-item { padding: 10px 0; }
+.wish-images, .wish-links { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+.wish-images img, .wish-keep img { width: 96px; height: 96px; object-fit: contain; background: var(--bg); }
+.wish-links a { overflow-wrap: anywhere; }
+.wish-fields .wish-keep { display: flex; align-items: center; flex-wrap: wrap; }
+.wish-fields button { justify-self: start; }
+.wish-item > .row { flex-wrap: wrap; }
+
+.sharing-settings > h2 { margin-top: 16px; }
+
+.wish-item > .row > .grow { flex: 1 1 200px; }
+@media (max-width: 900px) { .sharing-head { padding-inline: 2px; } }

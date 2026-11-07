@@ -1,0 +1,3 @@
+ALTER TABLE places ADD COLUMN address TEXT;
+ALTER TABLE places ADD COLUMN latitude REAL;
+ALTER TABLE places ADD COLUMN longitude REAL;
