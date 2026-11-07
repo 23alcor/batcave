@@ -9,7 +9,7 @@ import { userDB, userStub } from './userdb.js';
 import demoSeed from '../examples/demo.sql';
 export { UserDB } from './userdb.js';
 import { summarizePending, transcriptsApi, transcriptsIngest } from './transcripts.js';
-import { OAUTH_PATH, mcp, oauthProvider, vaultIngest } from './mcp.js';
+import { OAUTH_PATH, mcp, memoriesIngest, oauthProvider, vaultIngest } from './mcp.js';
 import { weather } from './weather.js';
 import { searchPlaces } from './place-search.js';
 import { placePhoto } from './place-photos.js';
@@ -817,6 +817,7 @@ export default {
         if (['/api/ingest/todo', '/api/ingest/alfred'].includes(url.pathname) && req.method === 'POST') return withHeaders(await ingestTodo(req, env, url));
         if (url.pathname.startsWith('/api/ingest/transcripts')) return withHeaders((await transcriptsIngest(req, env, url, ctx)) || bad('not found', 404));
         if (url.pathname === '/api/ingest/vault') return withHeaders(await vaultIngest(req, env));
+        if (url.pathname.startsWith('/api/ingest/memories')) return withHeaders(await memoriesIngest(req, env, url.pathname.replace(/\/+$/, '')));
         return bad('not found', 404);
       }
       // MCP server for outside AI clients: the owner's vault and dashboard (src/mcp.js). MCP_TOKEN for tools that
@@ -826,7 +827,10 @@ export default {
         if (!env.OAUTH_KV) return url.pathname === '/mcp' ? withHeaders(bad('unauthorized', 401)) : bad('not found', 404);
         return await oauthProvider(env.PUBLIC_ORIGIN || url.origin, {
           lib: alfredLib, consentPage,
-          owner: async (r, e) => (await sessionUser(r, e))?.id === 0 || e.DEV_BYPASS === '1',
+          owner: async (r, e) => { // true: the owner; false: someone else signed in; null: nobody
+            const u = await sessionUser(r, e);
+            return u ? u.id === 0 : e.DEV_BYPASS === '1' || null;
+          },
           loginRedirect: (r) => redirect('/login?next=' + encodeURIComponent(new URL(r.url).pathname + new URL(r.url).search)),
         }).fetch(req, env, ctx);
       }

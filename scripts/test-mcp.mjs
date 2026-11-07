@@ -95,24 +95,50 @@ test('MCP: create_task and log_session write through the existing code', async (
   assert.equal(await env.DB.prepare('SELECT source FROM transcripts WHERE id = ?1').bind(logged.data.id).first('source'), 'chatgpt');
 });
 
-test('Alfred reads the vault for the owner only', async (t) => {
+test('Alfred reads the vault and remembers: the owner via the bridge queue, a friend in their own vault', async (t) => {
   const { env, send } = setup(t);
   await send('/api/ingest/vault', 'ingest-test-token', 'PUT', { notes: NOTES });
+  const friendDB = database(); // a friend's own database: empty vault
+  t.after(() => friendDB.sql.close());
   const lib = { localNow: () => ({ date: '2026-11-07', time: '12:00' }), addDays: (d, n) => new Date(Date.parse(d) + n * 864e5).toISOString().slice(0, 10) };
+  let script = [];
   const seen = [];
   t.mock.method(globalThis, 'fetch', async (_url, opts) => {
     const body = JSON.parse(opts.body);
     seen.push(body);
     const outputs = body.input.filter((x) => x.type === 'function_call_output');
-    if (!outputs.length && body.tools.some((x) => x.name === 'whoami')) {
-      return new Response(JSON.stringify({ output: [{ type: 'function_call', name: 'whoami', arguments: '{}', call_id: '1' }] }));
-    }
-    return new Response(JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: outputs.length ? JSON.parse(outputs[0].output).about_me : 'no vault' }] }] }));
+    const next = script[outputs.length];
+    if (next) return new Response(JSON.stringify({ output: [{ type: 'function_call', name: next[0], arguments: JSON.stringify(next[1]), call_id: String(outputs.length) }] }));
+    return new Response(JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: outputs.map((o) => o.output).join('\n') }] }] }));
   });
-  const ask = async (uid) => (await (await chat(new Request('https://test.invalid/api/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'Who am I?' }] }) }),
-    { ...env, OPENAI_API_KEY: 'mock', UID: uid }, lib)).json()).reply;
-  assert.match(await ask(0), /Computer engineering student/);
-  assert.match(seen[0].instructions, /Their notes vault/);
-  assert.equal(await ask(1), 'no vault', 'a friend never gets the owner\'s vault tools');
-  assert.doesNotMatch(seen.at(-1).instructions, /Their notes vault/);
+  const ask = async (db, uid, steps) => {
+    script = steps;
+    const res = await chat(new Request('https://test.invalid/api/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) }),
+      { ...env, DB: db, OPENAI_API_KEY: 'mock', UID: uid }, lib);
+    return (await res.json()).reply;
+  };
+
+  // The owner: reads the mirrored vault; remembered facts wait for the bridge, which files them.
+  assert.match(await ask(env.DB, 0, [['whoami', {}]]), /Computer engineering student/);
+  assert.ok(seen[0].tools.some((x) => x.name === 'remember'));
+  assert.match(seen[0].instructions, /save it with remember without asking/);
+  await ask(env.DB, 0, [['remember', { fact: 'Has a saltwater reef tank' }], ['remember', { fact: 'has a saltwater reef tank' }]]);
+  const queued = await (await send('/api/ingest/memories', 'ingest-test-token', 'GET')).json();
+  assert.deepEqual(queued.memories.map((m) => [m.fact, m.note]), [['Has a saltwater reef tank', 'About Me']], 'saved once');
+  assert.match(await ask(env.DB, 0, [['whoami', {}]]), /just_remembered.*reef tank/);
+  const filed = await send('/api/ingest/memories/filed', 'ingest-test-token', 'POST', { ids: [queued.memories[0].id] });
+  assert.equal((await filed.json()).remaining, 0);
+
+  // A friend: their own vault, built as they talk, never the owner's notes.
+  assert.match(await ask(friendDB, 1, [['whoami', {}]]), /No \\"About Me\\" note yet/);
+  await ask(friendDB, 1, [['remember', { fact: 'Studies nursing at Hunter College' }], ['remember', { fact: 'Sister is named Maya', note: 'People' }]]);
+  assert.match(await ask(friendDB, 1, [['whoami', {}]]), /Studies nursing at Hunter College/);
+  assert.match(await ask(friendDB, 1, [['search_notes', { query: 'maya' }]]), /People\.md/);
+  assert.doesNotMatch(await ask(friendDB, 1, [['search_notes', { query: 'cloudflare' }]]), /Batcave/);
+  assert.match(await ask(friendDB, 1, [['forget', { text: 'nursing' }]]), /Forgot: Studies nursing/);
+  assert.doesNotMatch(await ask(friendDB, 1, [['whoami', {}]]), /nursing/);
+
+  // The preview never gets vault or memory tools.
+  await ask(env.DB, 'demo', []);
+  assert.ok(!seen.at(-1).tools.some((x) => ['whoami', 'remember'].includes(x.name)));
 });

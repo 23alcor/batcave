@@ -210,6 +210,12 @@ with the `INGEST_TOKEN`:
 | `GET /api/ingest/vault` | `{"hashes": {path: hash}}`, so the bridge sends only what changed |
 | `PUT /api/ingest/vault` | `{"notes": [{"path", "title", "folder"?, "tags"?, "updated_at"?, "hash"?, "body"}], "keep"?: [paths]}`: saves the notes (up to 500 per request, 200 KB each); with `keep`, removes every note not listed |
 
+**Alfred remembers.** When you mention something lasting about yourself in chat (school, work, goals,
+preferences, people), Alfred saves it. Your facts wait in a queue until the notes bridge writes them into your notes
+app (`GET /api/ingest/memories`, then `POST /api/ingest/memories/filed` with `{"ids": [...]}`). Friends have no
+bridge: each friend's vault lives in their own database and is built entirely from what they tell Alfred. Ask
+Alfred "what do you know about me?" to see it, or "forget …" to remove a fact. The MCP server stays owner-only.
+
 Put a note titled **About Me** in the vault (who you are, what you're working on, how you like answers): `whoami`
 returns it, and the server tells every AI to call `whoami` first. Whatever is in the vault copy is readable by the
 apps you connect, so leave out what you wouldn't tell them.

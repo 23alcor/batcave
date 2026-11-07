@@ -7,7 +7,7 @@ import { AuthorizationError, CimdFetchError, OAuthProvider } from '@cloudflare/w
 import { cfg } from './config.js';
 import { TOOLS, ToolError, makeTools } from './chat.js';
 import { transcriptsIngest } from './transcripts.js';
-import { VAULT_TOOLS, vaultTools } from './vault.js';
+import { VAULT_TOOLS, memoryQueue, vaultTools } from './vault.js';
 
 const MAX_RESULT = 24000; // chars per tool result, like the assistant
 const MAX_NOTE = 200_000; // bytes per stored note
@@ -129,6 +129,22 @@ export async function vaultIngest(req, env) {
   return json({ ok: true, saved: b.notes.length, removed });
 }
 
+// ---------- the owner's remembered facts (notes bridge, INGEST_TOKEN) ----------
+// GET  /api/ingest/memories → {memories: [{id, fact, note, at}]}: what the assistant saved, for the bridge to file.
+// POST /api/ingest/memories/filed {ids} → drops those from the queue once they are in the notes app.
+export async function memoriesIngest(req, env, path) {
+  const list = await memoryQueue.list(env.DB);
+  if (path === '/api/ingest/memories' && req.method === 'GET') return json({ memories: list });
+  if (path === '/api/ingest/memories/filed' && req.method === 'POST') {
+    const b = await req.json().catch(() => ({}));
+    const ids = new Set(Array.isArray(b.ids) ? b.ids : []);
+    const keep = list.filter((m) => !ids.has(m.id));
+    await memoryQueue.save(env.DB, keep);
+    return json({ ok: true, filed: list.length - keep.length, remaining: keep.length });
+  }
+  return bad('not found', 404);
+}
+
 // ---------- OAuth (claude.ai, ChatGPT and other connector UIs) ----------
 // One Worker is both the authorization server and the MCP resource. Approving a connector = being signed in
 // as the owner (the normal login) and clicking Allow. Needs a KV namespace bound as OAUTH_KV.
@@ -140,7 +156,9 @@ export function oauthProvider(origin, { lib, owner, consentPage, loginRedirect }
   const authorize = {
     async fetch(req, env) {
       const oauth = env.OAUTH_PROVIDER;
-      if (!(await owner(req, env))) return loginRedirect(req);
+      const who = await owner(req, env);
+      if (who === null) return loginRedirect(req);
+      if (!who) return new Response(`Only the owner of this ${cfg.app} can connect AI apps.`, { status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
       try {
         if (req.method === 'GET') {
           const request = await oauth.parseAuthRequest(req);
