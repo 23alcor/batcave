@@ -78,6 +78,7 @@ Secrets are set with `npx wrangler secret put NAME` and never stored in the repo
 | `PASSWORD_HASH`, `SESSION_SECRET` | Login (set by `npm run set-password`) |
 | `OPENAI_API_KEY` | The assistant |
 | `INGEST_TOKEN` | The to-do API, the Alfred command API and the Sessions API |
+| `MCP_TOKEN` | Optional: lets AI tools that take a header (Claude Code, Cursor, Codex) use the MCP server |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google Calendar sync |
 
 ## Keyboard shortcuts
@@ -180,6 +181,37 @@ curl -X POST "https://YOUR_SITE/api/ingest/transcripts?source=codex" \
 | `POST /api/ingest/transcripts/:id/summarize` | Summarize one that is waiting, and return it |
 | `POST /api/ingest/transcripts/:id/filed` | `{"path"?}`: it was saved to your notes |
 
+## MCP server (your context for any AI)
+
+`/mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server, so Claude, ChatGPT, Cursor, Codex and
+other AI apps can look you up instead of you re-explaining yourself. It runs as you (the owner) and offers:
+
+- **Your notes vault** (a read-only copy the notes bridge keeps up to date): `whoami` (your "About Me" note plus
+  the current time), `search_notes`, `read_note`, `list_notes`, `recent_sessions`.
+- **Your dashboard**: overview, tasks, schedule, free time, projects, habits, wishlist, garage, recipes, places to
+  eat. The only writes are `create_task` and `log_session` (sends the conversation to Sessions, above). Nothing
+  can be edited or deleted through it.
+
+Connect it two ways:
+
+- **Connector UIs** (claude.ai, the Claude apps, ChatGPT): add a custom connector with the URL
+  `https://YOUR_SITE/mcp`. You sign in to your site and click Allow. This needs a KV namespace for OAuth:
+  `npx wrangler kv namespace create OAUTH_KV`, then add it to `wrangler.jsonc` (see `wrangler.example.jsonc`).
+- **Tools that take a header**: `npx wrangler secret put MCP_TOKEN` (any long random string), then for example
+  `claude mcp add --transport http batcave https://YOUR_SITE/mcp --header "Authorization: Bearer $MCP_TOKEN"`.
+
+**Vault copy.** A notes bridge (for example a script on your Mac that reads your Obsidian vault) keeps it current
+with the `INGEST_TOKEN`:
+
+| Request | Does |
+| --- | --- |
+| `GET /api/ingest/vault` | `{"hashes": {path: hash}}`, so the bridge sends only what changed |
+| `PUT /api/ingest/vault` | `{"notes": [{"path", "title", "folder"?, "tags"?, "updated_at"?, "hash"?, "body"}], "keep"?: [paths]}`: saves the notes (up to 500 per request, 200 KB each); with `keep`, removes every note not listed |
+
+Put a note titled **About Me** in the vault (who you are, what you're working on, how you like answers): `whoami`
+returns it, and the server tells every AI to call `whoami` first. Whatever is in the vault copy is readable by the
+apps you connect, so leave out what you wouldn't tell them.
+
 ## Google Calendar (two-way)
 
 Optional. Without it, the week view shows the weekly schedule stored in the `events` table (or a read-only
@@ -264,7 +296,8 @@ npm run deploy
   (30 days), and an IP is locked out after 8 wrong passwords or invite codes in 15 minutes. Until your password
   is set, every page stays locked and nobody can sign up.
 - Cross-site writes are refused. The only public paths are `/login`, `/signup` (which needs an unused invite
-  code), `/demo` (the read-only preview), `/privacy`, the icons and app manifest, and the to-do API (which needs `INGEST_TOKEN`).
+  code), `/demo` (the read-only preview), `/privacy`, the icons and app manifest, the to-do API (which needs `INGEST_TOKEN`),
+  and the MCP server with its OAuth endpoints (`/mcp` needs `MCP_TOKEN` or an OAuth token you approved while signed in).
 - Change the password with `npm run set-password` (or `-- --generate` for a random passphrase saved to
   `.site-password`). Changing it signs out every device.
 
@@ -273,6 +306,7 @@ npm run deploy
 ```
 src/worker.js      API routes, login, to-do API, wake-up times, habits
 src/chat.js        The assistant: OpenAI Responses API tool loop
+src/mcp.js         MCP server for outside AI apps, its OAuth, and the notes-vault copy
 src/google.js      Google Calendar OAuth + two-way sync
 src/calendar.js    Weekly schedule expansion + iCal parsing
 src/auth.js        Password check, session cookie, lockout, login page

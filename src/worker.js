@@ -4,11 +4,12 @@ import { expandEvents, parseICS } from './calendar.js';
 import { chat, processTodo } from './chat.js';
 import { cfg, loadConfig, publicConfig, validTz, withUser } from './config.js';
 import { GoogleError, callback as googleCallback, cancelEvent, connect as googleConnect, createEvent, disconnect as googleDisconnect, getEvent, googleEvents, googleState, listCalendars, restoreEvent, setCalendarShown, syncCalendars, updateEvent } from './google.js';
-import { authConfigured, checkPassword, clearFailures, clearSessionCookie, hashPassword, lockedOut, loginPage, makeSessionCookie, recordFailure, safeNext, sessionUser, signupPage } from './auth.js';
+import { authConfigured, checkPassword, consentPage, clearFailures, clearSessionCookie, hashPassword, lockedOut, loginPage, makeSessionCookie, recordFailure, safeNext, sessionUser, signupPage } from './auth.js';
 import { userDB, userStub } from './userdb.js';
 import demoSeed from '../examples/demo.sql';
 export { UserDB } from './userdb.js';
 import { summarizePending, transcriptsApi, transcriptsIngest } from './transcripts.js';
+import { OAUTH_PATH, mcp, oauthProvider, vaultIngest } from './mcp.js';
 import { weather } from './weather.js';
 
 
@@ -35,8 +36,8 @@ async function body(req) {
 }
 
 // ---------- ingest token (Pi webhook server) ----------
-async function verifyIngest(req, env) {
-  const t = env.INGEST_TOKEN;
+const verifyIngest = (req, env) => bearerIs(req, env.INGEST_TOKEN);
+async function bearerIs(req, t) {
   const got = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
   if (!t || !got || t.length !== got.length) return false;
   let diff = 0;
@@ -794,7 +795,19 @@ export default {
         if (!(await verifyIngest(req, env))) return bad('unauthorized', 401);
         if (['/api/ingest/todo', '/api/ingest/alfred'].includes(url.pathname) && req.method === 'POST') return withHeaders(await ingestTodo(req, env, url));
         if (url.pathname.startsWith('/api/ingest/transcripts')) return withHeaders((await transcriptsIngest(req, env, url, ctx)) || bad('not found', 404));
+        if (url.pathname === '/api/ingest/vault') return withHeaders(await vaultIngest(req, env));
         return bad('not found', 404);
+      }
+      // MCP server for outside AI clients: the owner's vault and dashboard (src/mcp.js). MCP_TOKEN for tools that
+      // take a header (Claude Code, Cursor…); OAuth (needs OAUTH_KV) for connector UIs like claude.ai and ChatGPT.
+      if (OAUTH_PATH.test(url.pathname)) {
+        if (url.pathname === '/mcp' && env.MCP_TOKEN && (await bearerIs(req, env.MCP_TOKEN))) return withHeaders(await mcp(req, { ...env, UID: 0 }, alfredLib(), ctx));
+        if (!env.OAUTH_KV) return url.pathname === '/mcp' ? withHeaders(bad('unauthorized', 401)) : bad('not found', 404);
+        return await oauthProvider(env.PUBLIC_ORIGIN || url.origin, {
+          lib: alfredLib, consentPage,
+          owner: async (r, e) => (await sessionUser(r, e))?.id === 0 || e.DEV_BYPASS === '1',
+          loginRedirect: (r) => redirect('/login?next=' + encodeURIComponent(new URL(r.url).pathname + new URL(r.url).search)),
+        }).fetch(req, env, ctx);
       }
       if (url.pathname === '/login') {
         if (req.method === 'POST') return await login(req, env, url);

@@ -176,3 +176,18 @@ tabs.forEach((b, i) => {
 });
 if (location.hash === '#preview') pick(tabs[1]);</script>`);
 }
+
+// OAuth consent for the MCP server (/authorize): an AI app asks to read the owner's notes and dashboard.
+// Every client-supplied string is escaped: names and hosts come from the app's own registration.
+export function consentPage(d, handle) {
+  const who = d.clientDomain ? `Published by <strong>${esc(d.clientDomain)}</strong>.` : 'This app registered itself, so its name is not verified.';
+  return shell('connect an app', `<form method="post" action="/authorize">
+<input type="hidden" name="handle" value="${esc(handle)}">
+<p style="margin:0 0 8px;font-size:18px;font-weight:600">Allow ${esc(d.clientName || 'this app')} to use ${esc(cfg.app)}?</p>
+<p style="margin:0 0 8px;color:var(--muted);font-size:15px">${who} Access goes to <strong>${esc(d.redirectHost)}</strong>.</p>
+${d.redirectIsLoopback ? '<p class="err">This sends access to an app on this computer. Continue only if you just started connecting from it.</p>' : ''}
+<p style="margin:0;font-size:15px">It will be able to read your notes, tasks, calendar and habits, add tasks, and save session notes. It can't edit or delete anything.</p>
+<button type="submit" name="decision" value="approve">Allow</button>
+<button type="submit" name="decision" value="deny" style="background:transparent;color:var(--ink);border:1px solid var(--line)">Deny</button>
+</form>`);
+}

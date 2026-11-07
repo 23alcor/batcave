@@ -5,7 +5,7 @@ import { register } from 'node:module';
 const hooks = `
 import { readFile } from 'node:fs/promises';
 export async function resolve(spec, ctx, next) {
-  if (spec === 'cloudflare:workers') return { url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }', shortCircuit: true };
+  if (spec === 'cloudflare:workers') return { url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } } export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }', shortCircuit: true };
   return next(spec, ctx);
 }
 export async function load(url, ctx, next) {

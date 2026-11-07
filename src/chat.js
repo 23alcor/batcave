@@ -31,7 +31,7 @@ const RECIPE_FIELDS = {
   instructions: S('Full instructions, up to 30000 characters'),
 };
 
-const TOOLS = [
+export const TOOLS = [
   fn('get_overview', 'Snapshot of today: overdue/due-today/next-7-days/undated counts, inbox count, top focus items, today\'s habits, open items per project. Use first for "what should I work on" questions.'),
   fn('find_tasks', 'Find tasks and inbox items. Returns ids needed by update_task. Views: open = every open item, overdue, today, soon = due in the next 7 days, later = due after that, tbd = no date or uncertain date, inbox = quick to-dos, done = recently completed.', {
     view: S('Which tasks', { enum: ['open', 'overdue', 'today', 'soon', 'later', 'tbd', 'inbox', 'done'] }),
@@ -107,7 +107,7 @@ const TOOLS = [
   }, ['vehicle', 'kind', 'title']),
 ];
 
-class ToolError extends Error {}
+export class ToolError extends Error {}
 
 async function resolveProject(env, name) {
   if (!name) return null;
@@ -143,7 +143,7 @@ const taskOut = (t, today, lib) => ({
   ...(t.status && t.status !== 'open' ? { status: t.status } : { state: lib.bucket(t, today) }), ...(t.notes ? { notes: t.notes.slice(0, 300) } : {}),
 });
 
-function makeTools(env, lib, actions) {
+export function makeTools(env, lib, actions) {
   let projectsReviewed = false;
   const today = () => lib.localNow().date;
   const calendarWrite = async (fnc) => {

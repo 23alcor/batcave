@@ -5,7 +5,8 @@
   "name": "batcave",
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
-  "compatibility_flags": ["nodejs_als"],
+  // global_fetch_strictly_public: lets the MCP server's OAuth look up apps that identify themselves by URL.
+  "compatibility_flags": ["nodejs_als", "global_fetch_strictly_public"],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -25,6 +26,9 @@
   // Optional: serve it on your own domain (the domain has to be on your Cloudflare account).
   // Without this it lives at https://batcave.<your-subdomain>.workers.dev
   // "routes": [{ "pattern": "cave.example.com", "custom_domain": true }],
+  // Optional: OAuth for the MCP server (/mcp), so claude.ai, ChatGPT and other connector UIs can use it.
+  // Create it with `npx wrangler kv namespace create OAUTH_KV` and paste the id.
+  // "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "YOUR_KV_NAMESPACE_ID" }],
   "observability": { "enabled": true },
   // Optional: summarize session transcripts that are still waiting, every 5 minutes (Sessions page).
   // "triggers": { "crons": ["*/5 * * * *"] },
