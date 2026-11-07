@@ -3,6 +3,7 @@ import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import worker from '../src/worker.js';
+import { chat } from '../src/chat.js';
 
 function database() {
   const sql = new DatabaseSync(':memory:');
@@ -92,4 +93,26 @@ test('MCP: create_task and log_session write through the existing code', async (
   const logged = await call('log_session', { transcript: 'User and assistant reviewed backpropagation and the chain rule in detail.', kind: 'study', source: 'chatgpt' });
   assert.equal(logged.data.ok, true);
   assert.equal(await env.DB.prepare('SELECT source FROM transcripts WHERE id = ?1').bind(logged.data.id).first('source'), 'chatgpt');
+});
+
+test('Alfred reads the vault for the owner only', async (t) => {
+  const { env, send } = setup(t);
+  await send('/api/ingest/vault', 'ingest-test-token', 'PUT', { notes: NOTES });
+  const lib = { localNow: () => ({ date: '2026-11-07', time: '12:00' }), addDays: (d, n) => new Date(Date.parse(d) + n * 864e5).toISOString().slice(0, 10) };
+  const seen = [];
+  t.mock.method(globalThis, 'fetch', async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    seen.push(body);
+    const outputs = body.input.filter((x) => x.type === 'function_call_output');
+    if (!outputs.length && body.tools.some((x) => x.name === 'whoami')) {
+      return new Response(JSON.stringify({ output: [{ type: 'function_call', name: 'whoami', arguments: '{}', call_id: '1' }] }));
+    }
+    return new Response(JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: outputs.length ? JSON.parse(outputs[0].output).about_me : 'no vault' }] }] }));
+  });
+  const ask = async (uid) => (await (await chat(new Request('https://test.invalid/api/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'Who am I?' }] }) }),
+    { ...env, OPENAI_API_KEY: 'mock', UID: uid }, lib)).json()).reply;
+  assert.match(await ask(0), /Computer engineering student/);
+  assert.match(seen[0].instructions, /Their notes vault/);
+  assert.equal(await ask(1), 'no vault', 'a friend never gets the owner\'s vault tools');
+  assert.doesNotMatch(seen.at(-1).instructions, /Their notes vault/);
 });
