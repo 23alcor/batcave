@@ -629,7 +629,24 @@ function wishMediaFields(item = {}) {
   return `<label>Links (one per line)<textarea class="input" name="links" rows="2" placeholder="https://…">${esc((item.links || []).join('\n'))}</textarea></label>
     <label>Image URLs (one per line)<textarea class="input" name="image_urls" rows="2" placeholder="https://…">${esc((item.images || []).filter(i => !i.startsWith('data:')).join('\n'))}</textarea></label>
     ${(item.images || []).filter(i => i.startsWith('data:')).map(i => `<label class="wish-keep"><input type="checkbox" name="keep_image" value="${esc(i)}" checked><img src="${esc(i)}" alt="Saved image" loading="lazy">Keep image</label>`).join('')}
-    <label>Add images<input class="input" type="file" name="uploads" accept="image/png,image/jpeg,image/webp,image/gif" multiple><span class="meta">Up to 6 images, 500 KB total. Use image URLs for larger files.</span></label>`;
+    <label>Add images<input class="input" type="file" name="uploads" accept="image/png,image/jpeg,image/webp,image/gif" multiple><span class="meta">Up to 6 images. Large photos are shrunk to fit.</span></label>`;
+}
+// Uploaded images live in the item's database row (capped by the server), so shrink each one to fit `budget` characters.
+async function shrinkImage(file, budget) {
+  const read = () => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(new Error('Could not read image')); r.readAsDataURL(file); });
+  if (file.size * 1.37 < budget && file.type === 'image/gif') return read(); // small GIFs stay animated
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); } catch { throw new Error(`Could not open ${file.name}. Try a JPEG or PNG.`); }
+  const canvas = document.createElement('canvas');
+  for (let max = 1600, quality = 0.85; max >= 200; max = Math.round(max * 0.75), quality = Math.max(0.6, quality - 0.08)) {
+    const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+    canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const url = canvas.toDataURL('image/webp', quality);
+    const out = url.startsWith('data:image/webp') ? url : canvas.toDataURL('image/jpeg', quality); // Safari < 17 can't encode WebP
+    if (out.length <= budget) return out;
+  }
+  throw new Error(`${file.name} is too detailed to fit. Use an image URL instead.`);
 }
 const WISH_STATUSES = ['Searching', 'Waiting for discount', 'Saving money', 'Bought', 'Gave up'];
 async function viewWishlist(view) {
@@ -1029,9 +1046,11 @@ document.addEventListener('submit', async (ev) => {
       try {
         const lines = value => (value || '').split('\n').map(s => s.trim()).filter(Boolean);
         const data = new FormData(form), files = data.getAll('uploads').filter(file => file.size);
-        if (files.some(file => !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) || files.reduce((n, file) => n + file.size, 0) > 500000) throw new Error('Choose PNG, JPEG, WebP or GIF images under 500 KB total, or use image URLs.');
-        const uploads = await Promise.all(files.map(file => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Could not read image')); reader.readAsDataURL(file); })));
-        const payload = { name: f.name, category: f.category, price: f.price, links: lines(f.links), images: [...data.getAll('keep_image'), ...lines(f.image_urls), ...uploads] };
+        if (files.some(file => !file.type.startsWith('image/'))) throw new Error('Choose image files, or use image URLs.');
+        const kept = data.getAll('keep_image'), budget = (650000 - kept.join('').length) / Math.max(files.length, 1);
+        if (budget < 20000) throw new Error('Not enough room for more images on this item. Untick a saved image or use image URLs.');
+        const uploads = await Promise.all(files.map(file => shrinkImage(file, budget)));
+        const payload = { name: f.name, category: f.category, price: f.price, links: lines(f.links), images: [...kept, ...lines(f.image_urls), ...uploads] };
         const edit = form.dataset.form === 'edit-wish';
         await api('/api/wishlist' + (edit ? '/' + form.dataset.id : ''), { method: edit ? 'PATCH' : 'POST', body: payload });
         toast(edit ? 'Saved' : 'Added'); return render();

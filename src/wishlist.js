@@ -76,7 +76,7 @@ export async function wishlist(req, env, path, method, today) {
     sets.push(`links = ?${values.push(JSON.stringify(links))}`, `link = ?${values.push(links[0] || null)}`);
   }
   if ('images' in b) {
-    if (!Array.isArray(b.images) || b.images.length > 6 || b.images.some(v => typeof v !== 'string' || !(v.length <= 2000 && webURL(v) || /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$/.test(v))) || JSON.stringify(b.images).length > 700000) return bad('Use up to 6 images, under 500 KB total, or image URLs.');
+    if (!Array.isArray(b.images) || b.images.length > 6 || b.images.some(v => typeof v !== 'string' || !(v.length <= 2000 && webURL(v) || /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$/.test(v))) || JSON.stringify(b.images).length > 700000) return bad('Use up to 6 images (about 700 KB in all), or image URLs.');
     sets.push(`images = ?${values.push(JSON.stringify(b.images))}`);
   }
   if (method === 'POST') {
