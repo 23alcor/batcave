@@ -14,9 +14,9 @@ const fn = (name, description, properties = {}, required = []) => ({
 export const VAULT_TOOLS = [
   fn('whoami', 'Who the owner is: their "About Me" note (background, school, work, projects, goals, routine, how they like answers), plus the current date, time and time zone. Use it when the answer depends on who they are or what they are working on.'),
   fn('search_notes', 'Full-text search of their notes vault (projects, courses, areas, session notes, daily notes). Returns paths and matching snippets; read a note with read_note.', {
-    query: S('Words to look for'), folder: S('Optional folder prefix, e.g. "01 Projects" or "02 Areas/School"'), limit: { type: 'integer', description: 'Max results, default 10, up to 30' },
+    query: S('Words to look for'), folder: S('Optional folder prefix, e.g. "30 Project and Hobby/31 Pet Projects" or "10 Learning and Teaching/11 Academic"'), limit: { type: 'integer', description: 'Max results, default 10, up to 30' },
   }, ['query']),
-  fn('read_note', 'Read one note in full (with its YAML properties). Takes a path from search_notes/list_notes, or a note title.', { path: S('Path like "01 Projects/Batcave/Batcave.md", or a note title') }, ['path']),
+  fn('read_note', 'Read one note in full (with its YAML properties). Takes a path from search_notes/list_notes, or a note title.', { path: S('Path like "30 Project and Hobby/31 Pet Projects/Batcave/Batcave.md", or a note title') }, ['path']),
   fn('list_notes', 'List notes in their vault, newest first: path, title, tags, last edit.', { folder: S('Optional folder prefix'), limit: { type: 'integer', description: 'Default 50, up to 300' } }),
   fn('related_notes', 'Follow the links of their notes (a knowledge graph): what a note links to, and every note that links to it, with the line around each link. Works for concepts without a note of their own too, e.g. "CUDA". Use it to widen from one note to related projects, courses, sessions and ideas.', {
     note: S('A note title or path, or a concept name'),
@@ -191,7 +191,7 @@ export function memoryTools(env, lib, actions) {
       if (!env.UID) {
         const list = await queue(db);
         const keep = list.filter((m) => !(m.fact.toLowerCase().includes(text) && (!only || m.note === only)));
-        if (keep.length === list.length) throw new ToolError('Nothing waiting matches. Facts already filed are in "00 Inbox/Alfred memory.md" in their notes app, where they can delete the line.');
+        if (keep.length === list.length) throw new ToolError('Nothing waiting matches. Facts already filed are in "00 Home/01 About Me/Alfred memory.md" in their notes app, where they can delete the line.');
         await saveQueue(db, keep);
         const summary = `Forgot ${list.length - keep.length} saved fact(s)`;
         actions.push(summary);
