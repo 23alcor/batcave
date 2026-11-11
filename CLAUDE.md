@@ -21,7 +21,7 @@ npm run deploy                           # wrangler deploy
 npm run db:migrate                       # apply new migrations to the remote D1
 npm run set-password [-- --local]        # login password (remote secret, or .dev.vars)
 npm run setup [-- --dry-run]             # first-time setup for a new install
-node --check src/*.js public/app.js scripts/*.mjs   # quick syntax check (there is no build or test suite)
+node --check src/*.js public/app.js scripts/*.mjs   # quick syntax check (no build step; `npm test` runs the test suite)
 ```
 
 `wrangler.jsonc` is git-ignored. Without one, copy `wrangler.example.jsonc` (any D1 id works for local dev).
