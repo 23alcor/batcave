@@ -94,9 +94,9 @@ function shell(title, inner) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="${app}">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2"><link rel="manifest" href="/manifest.webmanifest">
 <title>${app} · ${title}</title><meta name="theme-color" content="#0F1012"><meta name="robots" content="noindex">
-<link rel="icon" href="/moon.svg" type="image/svg+xml">
+<link rel="icon" href="/icon-192.png?v=2" type="image/png">
 <style>
 :root{--bg:#F4F4F5;--card:#FFFFFF;--ink:#16171A;--muted:#5C5F66;--line:#DADBDF;--accent:#16171A;--accent-ink:#FFFFFF;--err:#B42318}
 @media (prefers-color-scheme:dark){:root{--bg:#0F1012;--card:#17181B;--ink:#E6E6E8;--muted:#A6A9B0;--line:#2A2B30;--accent:#E6E6E8;--accent-ink:#0F1012;--err:#FF8A80}}
@@ -104,7 +104,7 @@ function shell(title, inner) {
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);font:16px/1.5 Inter,system-ui,-apple-system,sans-serif;padding:16px}
 main{width:100%;max-width:360px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px 24px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:20px;margin:0 0 20px}
-.brand svg{flex:none}
+.brand img{flex:none}
 label{display:block;font-size:14px;color:var(--muted);margin:12px 0 6px}
 label:first-of-type{margin-top:0}
 input{width:100%;min-height:44px;padding:0 12px;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--ink);font:inherit}
@@ -121,7 +121,7 @@ button{margin-top:16px;width:100%;min-height:44px;border:0;border-radius:10px;ba
 a.btn{display:flex;align-items:center;justify-content:center;min-height:44px;border-radius:10px;background:var(--accent);color:var(--accent-ink);font-size:15px;font-weight:600;text-decoration:none}
 </style></head>
 <body><main>
-<p class="brand"><svg width="26" height="26" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="9" fill="#0F1012"/><path d="M22 6 A14 14 0 1 0 22 34 A6 14 0 1 1 22 6 Z" fill="#FFFFFF"/></svg>${app}</p>
+<p class="brand"><img src="/icon-192.png?v=2" width="26" height="26" alt="" style="border-radius:6px">${app}</p>
 ${inner}
 </main></body></html>`;
 }
