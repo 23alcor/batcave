@@ -10,6 +10,63 @@ const request = (path, body, token = 'test-token') => new Request('https://test.
   method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
 });
 
+test('Alfred receives duration clarification guidance and keeps the answer in chat history', async (t) => {
+  const question = 'Roughly how long will this take, or should we plan a first work session?';
+  let round = 0;
+  const env = { OPENAI_API_KEY: 'mock' };
+  const lib = {
+    localNow: () => ({ date: '2026-11-11', time: '12:00' }),
+    addDays: (date) => date,
+    events: async () => ({ events: [
+      { title: 'Class', start: '2026-11-12T10:00', end: '2026-11-12T11:00' },
+      { title: 'Work', start: '2026-11-12T12:00', end: '2026-11-12T14:00' },
+    ], deadlines: [] }),
+  };
+  t.mock.method(globalThis, 'fetch', async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    assert.match(body.instructions, /Use any duration already given in the conversation or task notes/);
+    assert.match(body.instructions, /ask one brief question before calling find_free_time or saving a chosen work time/);
+    assert.match(body.instructions, /do not delay saving an explicitly timed task/);
+    assert.match(body.instructions, /do not imply one session will finish a larger task/);
+    assert.match(body.instructions, /If no suitable window fits/);
+    if (round++ === 0) return json({ output: [message(question)] });
+    assert.equal(body.input[1].content, question);
+    assert.equal(body.input[2].content, 'It needs a two-hour first session tomorrow.');
+    if (round === 2) return json({ output: [call('find_free_time', { minutes: 120, start_date: '2026-11-12', days: 1, day_start: '08:00', day_end: '17:00' }, 'duration')] });
+    const result = JSON.parse(body.input.find(x => x.type === 'function_call_output').output);
+    assert.equal(result.minutes_needed, 120);
+    assert.deepEqual(result.days[0].free, [{ start: '14:15', end: '17:00', minutes: 165 }]);
+    return json({ output: [message('A two-hour first session fits tomorrow at 2:15 PM.')] });
+  });
+  const history = [{ role: 'user', content: 'When should I work on my project?' }];
+  const first = await (await chat(request('/api/chat', { messages: history }), env, lib)).json();
+  assert.equal(first.reply, question);
+  assert.equal(first.changed, false);
+  const second = await (await chat(request('/api/chat', { messages: [...history, { role: 'assistant', content: first.reply }, { role: 'user', content: 'It needs a two-hour first session tomorrow.' }] }), env, lib)).json();
+  assert.match(second.reply, /two-hour first session/);
+  assert.equal(second.changed, false, 'A recommendation alone must not create or change a task');
+});
+
+test('one-way to-do API receives an unscheduled fallback for ambiguous durations', async (t) => {
+  let saved;
+  t.mock.method(globalThis, 'fetch', async (_url, opts) => {
+    const { instructions } = JSON.parse(opts.body);
+    assert.match(instructions, /owner cannot answer follow-up questions/);
+    assert.match(instructions, /save it without choosing a work time: preserve any explicit deadline, otherwise use the inbox/);
+    assert.match(instructions, /Duration needs clarification before scheduling/);
+    return json({ output: [message('This task still needs a duration.')] });
+  });
+  const result = await processTodo({ OPENAI_API_KEY: 'mock' }, {
+    localNow: () => ({ date: '2026-11-11', time: '12:00' }),
+    createTask: async (_env, body) => { saved = body; return json({ id: 'unscheduled' }, 201); },
+  }, { text: 'Work on my project', notes: 'Keep these notes' });
+  assert.equal(result.status, 200);
+  assert.equal(saved.kind, 'inbox');
+  assert.equal(saved.due_at, undefined);
+  assert.equal(saved.notes, 'Keep these notes');
+  assert.match(result.body.reply, /needs a duration/);
+});
+
 test('preview visitors cannot call Alfred, including when the local owner bypass is enabled', async (t) => {
   const upstream = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Preview must not call the model'); });
   const env = { DEV_BYPASS: '1', OPENAI_API_KEY: 'mock', DB: { prepare() { throw new Error('Preview chat must not access data'); } } };
