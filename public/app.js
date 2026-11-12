@@ -2,6 +2,8 @@
 // window.__CFG (name, assistant, time zone…) is filled in by the Worker from wrangler.jsonc vars.
 import { temperature, weatherInfo, weatherIcon } from './weather.js';
 import { setupPlaceMap, setupPlacePhotos } from './place-map.js';
+import { renderBudgetApp } from './budget.js';
+import { createPageRenderer } from './navigation.js';
 const CFG = { app: 'Batcave', owner: '', assistant: 'Alfred', tz: 'America/New_York', ...(window.__CFG || {}) };
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -405,7 +407,8 @@ async function viewCommand(view) {
   const d = await refreshDash();
   state.layout = fitLayout(d.layout);
   drawHome(view, false);
-  await Promise.all([loadWeek(state.weekStart), loadAgenda(), loadWeather()]);
+  // Fill independent widgets in the background so navigation never waits on location permission.
+  Promise.all([loadWeek(state.weekStart), loadAgenda(), loadWeather()]).catch(e => toast(e.message));
 }
 function calendarControls(w) {
   const g = w.google || {};
@@ -649,29 +652,49 @@ async function shrinkImage(file, budget) {
   throw new Error(`${file.name} is too detailed to fit. Use an image URL instead.`);
 }
 const WISH_STATUSES = ['Searching', 'Waiting for discount', 'Saving money', 'Bought', 'Gave up'];
+const WISH_STYLES = {
+  'budget-classic': 'Budget classic', 'image-first': 'Image first', 'compact-horizontal': 'Compact horizontal',
+  editorial: 'Editorial', 'split-panel': 'Split panel', 'text-only': 'Text only',
+  'photo-showcase': 'Photo showcase', 'price-first': 'Price first', gallery: 'Gallery', 'status-led': 'Status led',
+};
+state.wishStyle = 'budget-classic';
+try {
+  const saved = localStorage.getItem('batcave-wish-style');
+  if (Object.hasOwn(WISH_STYLES, saved)) state.wishStyle = saved;
+} catch { /* storage unavailable */ }
+
 async function viewWishlist(view) {
   const { items, members, own } = await api('/api/wishlist');
   const f = state.wishFilter;
   const shown = items.filter((i) => f === 'All' || i.status === f);
   const cats = [...new Set(shown.map((i) => i.category || 'Other'))].sort();
   view.innerHTML = `
-    <header class="head sharing-head"><div><h1>Wishlist</h1><div class="sub">${items.filter((i) => !['Bought', 'Gave up'].includes(i.status)).length} things you want · ${members.length ? 'shared with ' + members.map(esc).join(', ') : 'private'}</div></div></header>
-    <section class="card"><form class="form-row" data-form="add-wish"><label class="sr" for="w-n">Item</label><input id="w-n" class="input" name="name" placeholder="Add something…" required>
-      <label class="sr" for="w-c">Category</label><input id="w-c" class="input" name="category" placeholder="Category" list="wish-cats" style="flex:0 1 180px"><datalist id="wish-cats">${[...new Set(items.map((i) => i.category).filter(Boolean))].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
-      <label class="sr" for="w-p">Price</label><input id="w-p" class="input" name="price" inputmode="decimal" placeholder="Price" style="flex:0 1 110px"><button class="btn primary">Add</button><details class="wish-media"><summary>Add images and links</summary><div class="wish-fields">${wishMediaFields()}</div></details></form></section>
-    <section class="card"><div class="chips" role="group" aria-label="Status" style="margin-bottom:6px">${[...WISH_STATUSES, 'All'].map((s) => `<button class="chip${f === s ? ' on' : ''}" data-action="wish-filter" data-filter="${esc(s)}" aria-pressed="${f === s}">${esc(s)}</button>`).join('')}</div>
-      ${cats.map((c) => `<div class="group-title"><span>${esc(c)}</span><span>${shown.filter((i) => (i.category || 'Other') === c).length}</span></div>${shown.filter((i) => (i.category || 'Other') === c).map((i) => `<div class="wish-item"><div class="row">
-        <span class="grow">${i.links?.length ? `<a href="${esc(i.links[0])}" target="_blank" rel="noopener noreferrer">${esc(i.name)}</a>` : esc(i.name)}${i.notes ? `<span class="meta">${esc(i.notes)}</span>` : ''}</span>
-        <span class="when muted">${i.price != null ? '$' + Number(i.price).toLocaleString() : ''}</span>
-        <label class="sr" for="ws-${esc(i.id)}">Status</label><select id="ws-${esc(i.id)}" class="input" style="min-height:34px;flex:0 0 auto" data-action="wish-status" data-id="${esc(i.id)}" data-prev="${esc(i.status)}">${WISH_STATUSES.map((s) => `<option${s === i.status ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></div>
+    <header class="head sharing-head"><div><h1>Wishlist</h1><div class="sub">${items.filter((i) => !['Bought', 'Gave up'].includes(i.status)).length} things you want · ${members.length ? 'shared with ' + members.map(esc).join(', ') : 'private'}</div></div><div class="actions"><button class="btn primary" type="button" data-action="wish-add" aria-haspopup="dialog" aria-controls="wish-add-dialog">Add item</button></div></header>
+    <dialog id="wish-add-dialog" aria-labelledby="wish-add-title"><form data-form="add-wish">
+      <h2 id="wish-add-title">Add wishlist item</h2>
+      <label for="w-n">Item<input id="w-n" class="input" name="name" placeholder="What are you wishing for?" maxlength="300" required autofocus></label>
+      <label for="w-c">Category<input id="w-c" class="input" name="category" placeholder="Category" list="wish-cats" maxlength="60"></label><datalist id="wish-cats">${[...new Set(items.map((i) => i.category).filter(Boolean))].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+      <label for="w-p">Price<input id="w-p" class="input" name="price" type="number" min="0" step="any" inputmode="decimal" placeholder="Optional"></label>
+      <details class="wish-media"><summary>Add images and links</summary><div class="wish-fields">${wishMediaFields()}</div></details>
+      <p data-wish-error role="alert" hidden></p>
+      <div class="form-row"><button class="btn" type="button" data-action="wish-add-cancel">Cancel</button><button class="btn primary" type="submit">Add item</button></div>
+    </form></dialog>
+    <div class="wish-toolbar"><div class="chips" role="group" aria-label="Status">${[...WISH_STATUSES, 'All'].map((s) => `<button class="chip${f === s ? ' on' : ''}" data-action="wish-filter" data-filter="${esc(s)}" aria-pressed="${f === s}">${esc(s)}</button>`).join('')}</div>
+      <label class="wish-style-label" for="wish-style">Card style<select id="wish-style" class="input" data-action="wish-style">${Object.entries(WISH_STYLES).map(([value, label]) => `<option value="${value}"${state.wishStyle === value ? ' selected' : ''}>${label}</option>`).join('')}</select></label></div>
+    <div id="wish-list" data-style="${state.wishStyle}">
+      ${cats.map((c, index) => `<section class="wish-category" aria-labelledby="wish-category-${index}"><h2 id="wish-category-${index}">${esc(c)} <span class="muted">(${shown.filter((i) => (i.category || 'Other') === c).length})</span></h2><div class="wish-grid">${shown.filter((i) => (i.category || 'Other') === c).map((i) => `<article class="wish-item" aria-labelledby="wish-title-${esc(i.id)}">
+        <div class="wish-title"><span class="wish-category-label">${esc(c)}</span><h3 id="wish-title-${esc(i.id)}">${i.links?.length ? `<a href="${esc(i.links[0])}" target="_blank" rel="noopener noreferrer">${esc(i.name)}</a>` : esc(i.name)}</h3></div>
+        ${i.price != null ? `<span class="wish-price">${Number(i.price).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}</span>` : ''}
+        <label class="wish-status"><span class="sr">Status for ${esc(i.name)}</span><select class="input" data-action="wish-status" data-id="${esc(i.id)}" data-prev="${esc(i.status)}">${WISH_STATUSES.map((s) => `<option${s === i.status ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></label>
         ${i.images?.length ? `<div class="wish-images">${i.images.map(src => `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer"><img src="${esc(src)}" alt="${esc(i.name)}" loading="lazy" referrerpolicy="no-referrer"></a>`).join('')}</div>` : ''}
+        ${i.notes ? `<p class="wish-notes">${esc(i.notes)}</p>` : ''}
         ${i.links?.length ? `<div class="wish-links">${i.links.map((url, index) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(new URL(url).hostname)}${i.links.length > 1 ? ' · ' + (index + 1) : ''}</a>`).join('')}</div>` : ''}
-        <details><summary>Edit item, images and links</summary><form class="wish-fields" data-form="edit-wish" data-id="${esc(i.id)}">
+        <details class="wish-edit"><summary>Edit item, images and links</summary><form class="wish-fields" data-form="edit-wish" data-id="${esc(i.id)}">
           <label>Item<input class="input" name="name" value="${esc(i.name)}" maxlength="300" required></label>
           <label>Category<input class="input" name="category" value="${esc(i.category || '')}" maxlength="60"></label>
           <label>Price<input class="input" name="price" value="${esc(i.price ?? '')}" type="number" min="0" step="any"></label>
-          ${wishMediaFields(i)}<button class="btn primary">Save</button></form></details></div>`).join('')}`).join('') || '<div class="empty">Nothing here.</div>'}
-    </section>
+          ${wishMediaFields(i)}<button class="btn primary">Save</button></form></details></article>`).join('')}</div></section>`).join('') || '<section class="card"><div class="empty">Nothing here.</div></section>'}
+    </div>
     <details class="card sharing-settings"><summary>Sharing settings</summary><h2>${members.length ? 'Shared wishlist' : 'Share this wishlist'}</h2>
       <p>${members.length ? `You and ${members.map(esc).join(', ')} can add and edit everything on this wishlist.` : 'This wishlist is private. Invite someone with a Batcave account to add and edit items together.'}</p>
       <p class="muted">Wishlist sharing is separate from Eating Out. One wishlist is open at a time. Joining keeps your private wishlist saved.</p>
@@ -726,8 +749,7 @@ async function viewEating(view) {
   state.eatingCleanup = () => { cleanupMap(); cleanupPhotos(); };
 }
 async function viewSpending(view) {
-  view.innerHTML = `<header class="head"><div><h1>Spending</h1><div class="sub">Budget, finance tracker and purchase planner</div></div></header>
-    <section class="card"><h2>Not moved over yet</h2><p class="muted" style="margin:8px 0 0">Your Monthly Budget, Budget &amp; Finance Tracker and Monthly Purchase Planner are still in Notion. They will come over in the next step of the import, once I know which of them you still use.</p></section>`;
+  await renderBudgetApp(view, { api, esc, toast });
 }
 
 // ---------- sessions (transcripts summarized into your notes) ----------
@@ -799,7 +821,8 @@ async function viewSession(view, id) {
 
 // ---------- router ----------
 const ROUTES = { '': viewCommand, deadlines: viewDeadlines, inbox: viewInbox, projects: viewProjects, daily: viewDaily, sessions: viewSessions, garage: viewGarage, wishlist: viewWishlist, spending: viewSpending, recipes: viewRecipes, eating: viewEating };
-async function render() {
+const render = createPageRenderer(renderPage, $('#view'));
+async function renderPage() {
   state.eatingCleanup?.(); state.eatingCleanup = null;
   const [, page = '', arg] = location.hash.replace(/^#/, '').split('/');
   $$('.nav a, .tabbar a, .more-panel a').forEach((a) => { const p = a.getAttribute('href').replace(/^#\//, ''); if (p === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
@@ -844,6 +867,11 @@ document.addEventListener('change', async (ev) => {
     if (el.dataset.action === 'cal-show') {
       await api('/api/google/calendars', { method: 'POST', body: { id: el.dataset.id, shown: el.checked } });
       await loadWeek(state.weekStart); await showCalendarPicker(true);
+    }
+    if (el.dataset.action === 'wish-style' && Object.hasOwn(WISH_STYLES, el.value)) {
+      state.wishStyle = el.value;
+      $('#wish-list').dataset.style = el.value;
+      try { localStorage.setItem('batcave-wish-style', el.value); } catch { /* storage unavailable */ }
     }
     if (el.dataset.action === 'wish-status') {
       const prev = el.dataset.prev, next = el.value;
@@ -946,6 +974,8 @@ document.addEventListener('click', async (ev) => {
       remember('Moved to Deadlines', () => set('inbox'), () => set('task'));
       rerender();
     }
+    if (a === 'wish-add') $('#wish-add-dialog').showModal();
+    if (a === 'wish-add-cancel') $('#wish-add-dialog').close();
     if (a === 'wish-filter') { state.wishFilter = el.dataset.filter; render(); }
     if (a === 'eat-share' || a === 'wish-share') {
       const { code } = await api(a === 'eat-share' ? '/api/eating/share' : '/api/wishlist/share', { method: 'POST' });
@@ -1053,7 +1083,11 @@ document.addEventListener('submit', async (ev) => {
         const payload = { name: f.name, category: f.category, price: f.price, links: lines(f.links), images: [...kept, ...lines(f.image_urls), ...uploads] };
         const edit = form.dataset.form === 'edit-wish';
         await api('/api/wishlist' + (edit ? '/' + form.dataset.id : ''), { method: edit ? 'PATCH' : 'POST', body: payload });
+        if (!edit) { $('#wish-add-dialog').close(); state.wishFilter = 'Searching'; }
         toast(edit ? 'Saved' : 'Added'); return render();
+      } catch (error) {
+        if (form.dataset.form === 'edit-wish') throw error;
+        const message = $('[data-wish-error]', form); message.textContent = error.message; message.hidden = false;
       } finally { button.disabled = false; }
     }
     if (form.dataset.form === 'add-habit') {

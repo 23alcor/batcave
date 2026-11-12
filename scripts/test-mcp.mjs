@@ -161,3 +161,164 @@ test('related_notes follows links both ways, including concepts without a note',
   assert.equal(concept.note.has_own_note, false);
   assert.deepEqual(concept.linked_from.map((x) => x.path).sort(), ['Courses/EECE 448.md', 'S/2026-11-05 EECE 448 - Backprop review.md']);
 });
+
+test('Agent contexts isolate concurrent tasks, reject stale saves, and confirm bridge filing', async (t) => {
+  const { env, send, call } = setup(t);
+  await send('/api/ingest/vault', env.INGEST_TOKEN, 'PUT', { notes: [
+    { path: 'Projects/Graph/Graph.md', title: 'Graph', body: '---\ntype: project\n---\n# Graph\nHuman-authored project description.' },
+    { path: 'Projects/Graph/Design.md', title: 'Design', body: '# Design\n## Decisions\nUse bookmarks.\n## Next\nBuild graph.' },
+  ] });
+  const a = (await call('resume_task', { project: 'Graph', task: 'Retrieval', agent: 'Claude' })).data;
+  const b = (await call('resume_task', { project: 'Graph', task: 'Interface', agent: 'Codex' })).data;
+  assert.notEqual(a.session_id, b.session_id);
+  assert.equal(a.revision, 0);
+  const save = { project: 'Graph', task: 'Retrieval', entry_note: 'Design', content: 'SECRET_CONTENT_IN_HANDOFF only, not telemetry.', next_action: 'Implement section reads', expected_revision: 0, session_id: a.session_id };
+  const first = (await call('save_handoff', save)).data;
+  assert.equal(first.status, 'queued');
+  assert.equal(first.revision, 1);
+  assert.match(first.path, /^Projects\/Graph\/Agent Context\//);
+  const stale = await call('save_handoff', { ...save, content: 'Overwrite' });
+  assert.equal(stale.isError, true);
+  assert.match(stale.data, /Revision conflict/);
+  const second = (await call('save_handoff', { ...save, content: 'Merged progress', expected_revision: 1 })).data;
+  assert.equal(second.revision, 2);
+  assert.equal(second.path, first.path);
+  const other = (await call('save_handoff', { ...save, task: 'Interface', content: 'Interface progress', session_id: b.session_id })).data;
+  assert.notEqual(other.path, first.path);
+  const unchanged = (await call('resume_task', { project: 'Graph', task: 'Retrieval', since_revision: 2, session_id: a.session_id })).data;
+  assert.equal(unchanged.unchanged, true);
+  assert.equal(unchanged.handoff, undefined);
+  const resumed = (await call('resume_project', { project: 'Graph', agent: 'Reviewer' })).data;
+  assert.equal(resumed.tasks.length, 2);
+  assert.equal(resumed.brief, null);
+  const brief = (await call('save_project_brief', { project: 'Graph', entry_note: 'Design', content: 'A graph for agent activity', expected_revision: 0, session_id: resumed.session_id })).data;
+  assert.equal(brief.revision, 1);
+  assert.equal((await call('save_handoff', { ...save, content: 'x'.repeat(3001), expected_revision: 2 })).isError, true);
+  assert.equal((await call('resume_task', { project: 'Graph', task: 'Retrieval', session_id: 'unknown' })).isError, true);
+  const queue = await (await send('/api/ingest/contexts', env.INGEST_TOKEN, 'GET')).json();
+  assert.equal(queue.contexts.length, 3);
+  assert.equal((await send('/api/ingest/contexts', env.MCP_TOKEN, 'GET')).status, 401);
+  assert.equal((await send('/api/agent-graph', env.INGEST_TOKEN, 'GET')).status, 401);
+  const before = await (await send('/api/agent-graph', env.MCP_TOKEN, 'GET')).json();
+  assert.ok(before.events.some((e) => e.action === 'save_requested' && e.session_id === a.session_id));
+  assert.ok(!JSON.stringify(before).includes('SECRET_CONTENT_IN_HANDOFF'));
+  assert.ok(!before.events.some((e) => e.action === 'file_saved'));
+  assert.equal((await send('/api/ingest/contexts/filed', env.INGEST_TOKEN, 'POST', { id: first.context_id, revision: 999 })).status, 409);
+  await send('/api/ingest/contexts/filed', env.INGEST_TOKEN, 'POST', { id: first.context_id, revision: 1 });
+  let queued = (await (await send('/api/ingest/contexts', env.INGEST_TOKEN, 'GET')).json()).contexts;
+  assert.ok(queued.some((c) => c.id === first.context_id), 'acknowledging revision 1 must not clear pending revision 2');
+  await send('/api/ingest/contexts/filed', env.INGEST_TOKEN, 'POST', { id: first.context_id, revision: 2 });
+  await send('/api/ingest/contexts/filed', env.INGEST_TOKEN, 'POST', { id: first.context_id, revision: 2 });
+  const after = await (await send('/api/agent-graph', env.MCP_TOKEN, 'GET')).json();
+  assert.equal(after.events.filter((e) => e.action === 'file_saved' && e.ref === first.context_id + ':2').length, 1);
+  assert.equal(after.contexts.find((c) => c.id === first.context_id).filed_revision, 2);
+  assert.match((await call('read_note', { path: 'Graph' })).data.body, /Human-authored/);
+});
+
+test('Bounded note reads preserve complete JSON, literal headings and continuation offsets', async (t) => {
+  const { send, call, env } = setup(t);
+  const content = '# Long note\n## A.*\n' + 'actual content '.repeat(1400) + '\n```md\n## Inside code\n```\n### Nested\nKeep this.\n## Other\nDo not include.';
+  await send('/api/ingest/vault', env.INGEST_TOKEN, 'PUT', { notes: [{ path: 'Long.md', title: 'Long', body: content }] });
+  const first = (await call('read_note', { path: 'Long', section: 'A.*', max_chars: 200 })).data;
+  assert.equal(first.body.length, 200);
+  assert.equal(first.truncated, true);
+  assert.equal(first.next_offset, 200);
+  const second = (await call('read_note', { path: 'Long', section: 'A.*', offset: first.next_offset, max_chars: 12000 })).data;
+  assert.equal(second.body, content.slice(content.indexOf('## A.*') + 200, content.indexOf('## A.*') + 12200));
+  const tail = (await call('read_note', { path: 'Long', section: 'A.*', offset: second.next_offset, max_chars: 12000 })).data;
+  assert.match(tail.body, /Inside code/);
+  assert.match(tail.body, /Keep this/);
+  assert.doesNotMatch(tail.body, /Do not include/);
+  assert.equal(tail.next_offset, null);
+  for (const args of [{ offset: -1 }, { max_chars: 90000 }, { section: 'A' }]) assert.equal((await call('read_note', { path: 'Long', ...args })).isError, true);
+});
+
+test('Activity has exact inserted ids and initialization identity; unauthenticated sockets receive no data', async (t) => {
+  const { AgentGraphHub, recordActivity } = await import('../src/agent-graph.js');
+  const { env, send } = setup(t);
+  const initialized = await send('/mcp', env.MCP_TOKEN, 'POST', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'Test client' } } });
+  const session = initialized.headers.get('Mcp-Session-Id');
+  assert.ok(session);
+  const ids = await Promise.all([recordActivity(env, session, 'read_note', ['A.md']), recordActivity(env, session, 'read_note', ['B.md'])]);
+  assert.notEqual(ids[0], ids[1]);
+  const makeSocket = () => ({ state: { authenticated: false, deadline: Date.now() + 10000 }, sent: [], closed: [], deserializeAttachment() { return this.state; }, serializeAttachment(s) { this.state=s; }, send(s) { this.sent.push(JSON.parse(s)); }, close(...a) { this.closed.push(a); } });
+  const bad = makeSocket(), good = makeSocket(), waiting = makeSocket();
+  const hub = new AgentGraphHub({ getWebSockets: () => [bad, good, waiting] }, env);
+  await hub.webSocketMessage(bad, JSON.stringify({ type: 'authenticate', token: 'wrong' }));
+  assert.equal(bad.closed[0][0], 1008);
+  await hub.webSocketMessage(good, JSON.stringify({ type: 'authenticate', token: env.MCP_TOKEN }));
+  assert.equal(good.sent[0].type, 'connected');
+  await hub.publish({ action: 'read_note', paths: ['A.md'] });
+  assert.equal(good.sent[1].type, 'activity');
+  assert.equal(waiting.sent.length, 0);
+  assert.equal(bad.sent.length, 0);
+  const oldKey = env.MCP_TOKEN; env.MCP_TOKEN = 'rotated-test-key';
+  await hub.publish({ action: 'read_note', paths: ['B.md'] });
+  assert.equal(good.closed[0][0], 1008);
+  assert.equal(good.sent.length, 2, 'rotated keys stop receiving activity');
+  env.MCP_TOKEN = oldKey;
+  const oversize = makeSocket();
+  await hub.webSocketMessage(oversize, 'x'.repeat(4097));
+  assert.equal(oversize.closed[0][0], 1008);
+});
+
+
+test('One connector keeps task identities separate, section bookmarks resume correctly, and friends cannot write contexts', async (t) => {
+  const { contextTools } = await import('../src/agent-graph.js');
+  const { env, send, call } = setup(t);
+  await send('/api/ingest/vault', env.INGEST_TOKEN, 'PUT', { notes: [{ path: 'Projects/P/P.md', title: 'P', body: '---\ntype: project\n---\n# P\n## Decisions\nKeep separate tasks.' }] });
+  const initialized = await send('/mcp', env.MCP_TOKEN, 'POST', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'Shared connector' } } });
+  const base = initialized.headers.get('Mcp-Session-Id');
+  const a = (await call('resume_task', { project: 'P', task: 'A', session_id: base })).data;
+  const b = (await call('resume_task', { project: 'P', task: 'B', session_id: base })).data;
+  assert.notEqual(a.session_id, b.session_id);
+  assert.equal((await env.DB.prepare('SELECT task FROM agent_sessions WHERE id=?1').bind(a.session_id).first()).task, 'A');
+  const saved = (await call('save_handoff', { project: 'P', task: 'A', entry_note: 'P#Decisions', content: 'Keep tasks separate', next_action: 'Continue A', expected_revision: 0, session_id: a.session_id })).data;
+  assert.equal(saved.revision, 1);
+  const resumed = (await call('resume_task', { project: 'P', task: 'A' })).data;
+  assert.equal(resumed.handoff.entry_note, 'Projects/P/P.md#Decisions');
+  assert.match((await call('read_note', { path: resumed.handoff.entry_note })).data.body, /Keep separate tasks/);
+  await call('save_handoff', { project: 'P', task: 'A', entry_note: 'P#Decisions', content: 'New agent continued A', next_action: 'Continue', expected_revision: 1, session_id: resumed.session_id });
+  await send('/api/ingest/contexts/filed', env.INGEST_TOKEN, 'POST', { id: saved.context_id, revision: 1 });
+  const filed = await env.DB.prepare("SELECT session_id FROM agent_events WHERE action='file_saved' AND ref=?1").bind(saved.context_id + ':1').first();
+  assert.equal(filed.session_id, a.session_id, 'a delayed acknowledgement belongs to the agent that saved that revision');
+  assert.equal((await call('save_handoff', { project: 'P', task: 'A', entry_note: 'P', content: 'Wrong identity', next_action: 'No', expected_revision: 1, session_id: b.session_id })).isError, true);
+  await assert.rejects(contextTools({ ...env, UID: 1 }).resume_project({ project: 'P' }), /only to the owner/);
+});
+
+test('new Obsidian notes are owner-only, idempotent, and saved only after bridge acknowledgement', async t => {
+  const {env, call, send} = setup(t);
+  await send('/api/ingest/vault', env.INGEST_TOKEN, 'PUT', {notes:[{path:'30 Project and Hobby/Project.md',folder:'30 Project and Hobby',title:'Project',body:'# Project'}]});
+  const args={title:'New idea',folder:'30 Project and Hobby',content:'A useful [[Project]] idea.'};
+  const created=(await call('create_note',args)).data;
+  assert.equal(created.status,'queued'); assert.equal(created.saved,false);
+  assert.equal((await call('create_note',args)).data.id,created.id);
+  assert.equal((await call('create_note',{...args,content:'Different'})).isError,true);
+  assert.equal((await call('create_note',{...args,title:'Project'})).isError,true);
+  assert.equal((await call('create_note',{...args,folder:'../escape'})).isError,true);
+  assert.equal((await send('/api/ingest/notes','wrong','GET')).status,401);
+  assert.equal((await (await send('/api/ingest/notes',env.INGEST_TOKEN,'GET')).json()).notes.length,1);
+  assert.equal((await call('note_status',{request_id:created.id})).data.saved,false);
+  await send('/api/ingest/notes/filed',env.INGEST_TOKEN,'POST',{id:created.id,status:'saved'});
+  assert.equal((await call('note_status',{request_id:created.id})).data.saved,true);
+  assert.equal((await send('/api/ingest/notes/filed',env.INGEST_TOKEN,'POST',{id:created.id,status:'error',error:'late'})).status,409);
+  const {noteTools}=await import('../src/note-requests.js');
+  await assert.rejects(noteTools({...env,UID:1}).create_note(args),/only to the owner/);
+});
+
+
+test('MCP budget tools accept session metadata but only prepare proposals and expose no approval tool', async t => {
+  const { call, rpc, env } = setup(t);
+  const initialized = await rpc('initialize', { clientInfo: { name: 'Budget test' }, protocolVersion: '2025-06-18' });
+  assert.ok(initialized.result);
+  const session_id = env.DB.sql.prepare('SELECT id FROM agent_sessions ORDER BY rowid DESC LIMIT 1').get().id;
+  const listing = await rpc('tools/list');
+  assert.ok(listing.result.tools.some(t => t.name === 'get_budget'));
+  assert.ok(!listing.result.tools.some(t => /approve.*budget|delete.*budget/.test(t.name)));
+  const result = await call('propose_budget_change', { session_id, resource: 'category', action: 'create', fields: { name: 'Books' }, reason: 'Requested category' });
+  assert.equal(result.isError, undefined, JSON.stringify(result)); assert.equal(result.data.status, 'pending');
+  assert.equal(env.DB.sql.prepare("SELECT count(*) n FROM budget_records WHERE kind='category'").get().n, 6);
+  assert.equal(env.DB.sql.prepare('SELECT count(*) n FROM budget_changes').get().n, 0);
+  const read = await call('get_budget', { session_id, view: 'proposals' }); assert.equal(read.data.proposals.length, 1);
+  assert.equal((await call('approve_budget_change', { session_id, id: result.data.proposal_id })).isError, true);
+});

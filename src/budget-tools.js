@@ -1,0 +1,17 @@
+const S = description => ({ type: 'string', description });
+const I = description => ({ type: 'integer', description });
+const fieldSchema = { type: 'object', additionalProperties: false, properties: {
+  name: S('Exact requested name'), color: S('Six-digit hex category color'), amount: I('Amount in integer cents, never floating-point dollars'),
+  category_id: S('Exact category id from get_budget'), period: { type: 'string', enum: ['weekly', 'monthly'] },
+  date: S('Actual transaction/repayment date YYYY-MM-DD'), status: { type: 'string', enum: ['review', 'tracked', 'ignored'] },
+  cycle: { type: 'string', enum: ['monthly', 'yearly'] }, start_date: S('Subscription first billing date, or limit period start (first of month/Monday), YYYY-MM-DD'), billing_day: I('Original billing day 1–31'),
+  method: S('Payment method, such as cash or Zelle'), active: { type: 'boolean', description: 'Whether to track future subscription renewals; does not cancel the provider plan' },
+  subscription_id: S('Subscription id when recording a payment'), billing_date: S('Specific scheduled billing cycle YYYY-MM-DD; prevents duplicate payment tracking'),
+  share_id: S('Exact share id for a repayment or forgiveness'),
+  shares: { type: 'array', maxItems: 30, description: 'Friends’ portions of a full charge. The remainder is the user’s original share. Preserve IDs when editing.', items: { type: 'object', additionalProperties: false, properties: { id: S('Existing share id, omitted for a new share'), name: S('Person name'), amount: I('Their share in cents') }, required: ['name', 'amount'] } },
+} };
+// Sparse create/update fields must stay optional; Responses otherwise attempts strict normalization.
+export const BUDGET_TOOLS = [
+  { type: 'function', strict: false, name: 'get_budget', description: 'Read this user’s budget, category limits, spending, outings, subscriptions, history or pending proposals. Read the exact record and its version before proposing an edit. Weekly and monthly limits are linked using 52 weeks per year: weekly = monthly * 12 / 52, monthly = weekly * 52 / 12, rounded to integer cents. The most recently saved applicable limit sets both views; propose only the requested limit, not a second converted record.', parameters: { type: 'object', additionalProperties: false, properties: { view: { type: 'string', enum: ['overview', 'categories', 'limits', 'transactions', 'subscriptions', 'history', 'proposals'] }, query: S('Filter records by name'), include_archived: { type: 'boolean' }, limit: I('Max records, 1–60, default 30') } } },
+  { type: 'function', strict: false, name: 'propose_budget_change', description: 'PREPARE ONLY: propose one exact budget change for human approval in Budget → Alfred proposals. This tool never applies changes or deletes data. No bulk operations. Use archive for removal; records remain restorable. Preserve unspecified fields. Explicit forgiveness increases personal spending; repayment does not. Never claim the budget changed before the user approves.', parameters: { type: 'object', additionalProperties: false, properties: { resource: { type: 'string', enum: ['category', 'limit', 'transaction', 'subscription'] }, action: { type: 'string', enum: ['create', 'update', 'archive', 'restore', 'repay', 'forgive'] }, id: S('Exact record id; omit for create'), version: I('Version from the latest get_budget; required except create'), fields: fieldSchema, reason: S('Explain the exact requested change and its effect, under 500 characters') }, required: ['resource', 'action', 'fields', 'reason'] } },
+];

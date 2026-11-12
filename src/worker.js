@@ -1,3 +1,5 @@
+import { activitySnapshot, contextQueue } from './agent-graph.js';
+export { AgentGraphHub } from './agent-graph.js';
 // Batcave — Cloudflare Worker: password-protected JSON API + static Ops Console UI.
 // Personal settings (name, time zone, assistant name…) come from wrangler.jsonc vars via src/config.js.
 import { expandEvents, parseICS } from './calendar.js';
@@ -10,10 +12,12 @@ import demoSeed from '../examples/demo.sql';
 export { UserDB } from './userdb.js';
 import { summarizePending, transcriptsApi, transcriptsIngest } from './transcripts.js';
 import { OAUTH_PATH, mcp, memoriesIngest, oauthProvider, vaultIngest } from './mcp.js';
+import { noteRequestsIngest } from './note-requests.js';
 import { weather } from './weather.js';
 import { searchPlaces } from './place-search.js';
 import { placePhoto } from './place-photos.js';
 import { wishlist, wishlistDB } from './wishlist.js';
+import { budgetApi } from './budget.js';
 
 
 // ---------- helpers ----------
@@ -536,6 +540,7 @@ async function api(req, env, url, ctx) {
   const m = req.method;
   const path = url.pathname.replace(/\/+$/, '');
   let match;
+  if (path === '/api/budget' || path.startsWith('/api/budget/')) return budgetApi(req, env, path, localNow().date);
   if (path === '/api/eating/search' && m === 'GET') return searchPlaces(url, ctx);
   if (path === '/api/weather' && m === 'GET') return weather(url, ctx);
   if (path === '/api/recipes' && m === 'GET') {
@@ -816,9 +821,19 @@ export default {
         if (!(await verifyIngest(req, env))) return bad('unauthorized', 401);
         if (['/api/ingest/todo', '/api/ingest/alfred'].includes(url.pathname) && req.method === 'POST') return withHeaders(await ingestTodo(req, env, url));
         if (url.pathname.startsWith('/api/ingest/transcripts')) return withHeaders((await transcriptsIngest(req, env, url, ctx)) || bad('not found', 404));
+        if (url.pathname === '/api/ingest/contexts' || url.pathname === '/api/ingest/contexts/filed') return withHeaders(await contextQueue(req, env, url));
         if (url.pathname === '/api/ingest/vault') return withHeaders(await vaultIngest(req, env));
+        if (url.pathname === '/api/ingest/notes' || url.pathname === '/api/ingest/notes/filed') return withHeaders(await noteRequestsIngest(req, env, url.pathname));
         if (url.pathname.startsWith('/api/ingest/memories')) return withHeaders(await memoriesIngest(req, env, url.pathname.replace(/\/+$/, '')));
         return bad('not found', 404);
+      }
+      if (url.pathname === '/api/agent-graph/stream') {
+        if (!env.GRAPH_HUB) return bad('Agent graph is not configured', 503);
+        if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return bad('WebSocket required', 426);
+        return env.GRAPH_HUB.get(env.GRAPH_HUB.idFromName('owner')).fetch(req);
+      }
+      if (url.pathname === '/api/agent-graph' && req.method === 'GET' && env.MCP_TOKEN && await bearerIs(req, env.MCP_TOKEN)) {
+        return withHeaders(json(await activitySnapshot(env, url.searchParams.get('after'))));
       }
       // MCP server for outside AI clients: the owner's vault and dashboard (src/mcp.js). MCP_TOKEN for tools that
       // take a header (Claude Code, Cursor…); OAuth (needs OAUTH_KV) for connector UIs like claude.ai and ChatGPT.
@@ -868,6 +883,7 @@ export default {
       if (user.id === 'demo' && path.startsWith('/api/') && (!['GET', 'HEAD'].includes(req.method) || /^\/api\/(account|admin|google\/(connect|callback))/.test(path))) {
         return bad('This is a preview, so nothing is saved. Create an account to make it yours.', 403);
       }
+      if (path === '/api/agent-graph') return withHeaders(user.id === 0 && req.method === 'GET' ? json(await activitySnapshot(env, url.searchParams.get('after'))) : bad('not found', 404));
       if (path === '/api/account') return withHeaders(await account(req, env, user));
       if (path.startsWith('/api/admin/')) return withHeaders(user.id ? bad('not found', 404) : await admin(req, env, path));
       const { env: uenv, settings } = user.id === 'demo' ? { env: await demoEnv(env), settings: DEMO_SETTINGS } : asUser(env, user);

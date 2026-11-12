@@ -1,0 +1,9 @@
+{
+  "id": "bat-vault-agent-graph",
+  "name": "Agent Graph",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Follow MCP agents across your notes, project bookmarks and task handoffs.",
+  "author": "Batcave",
+  "isDesktopOnly": false
+}

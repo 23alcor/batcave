@@ -8,6 +8,8 @@ import { cfg } from './config.js';
 import { TOOLS, ToolError, makeTools } from './chat.js';
 import { transcriptsIngest } from './transcripts.js';
 import { VAULT_TOOLS, memoryQueue, vaultTools } from './vault.js';
+import { NOTE_TOOLS, noteTools } from './note-requests.js';
+import { CONTEXT_TOOLS, contextTools, newAgentSession, recordActivity } from './agent-graph.js';
 
 const MAX_RESULT = 24000; // chars per tool result, like the assistant
 const MAX_NOTE = 200_000; // bytes per stored note
@@ -17,8 +19,8 @@ const clip = (s, n) => (typeof s === 'string' ? s.trim().slice(0, n) : '');
 const S = (description, extra = {}) => ({ type: 'string', description, ...extra });
 const tool = (name, description, properties = {}, required = []) => ({ name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false } });
 
-// Dashboard tools reused from the assistant. Read-only, plus adding a task; nothing that edits or deletes.
-const REUSED = ['get_overview', 'find_tasks', 'get_schedule', 'find_free_time', 'list_projects', 'create_task', 'get_habits',
+// Dashboard tools reused from the assistant. Budget edits are proposals requiring approval in the app.
+const REUSED = ['get_budget', 'propose_budget_change', 'get_overview', 'find_tasks', 'get_schedule', 'find_free_time', 'list_projects', 'create_task', 'get_habits',
   'list_wishlist', 'get_garage', 'list_recipes', 'get_recipe', 'list_eating_out'];
 
 const LOG_SESSION = tool('log_session', 'Save a summary of this conversation to their notes as a session note. Call it at the end of a real work or study session (not for quick questions). Send the conversation or a thorough account of it: what was done, decided and left open.', {
@@ -26,18 +28,20 @@ const LOG_SESSION = tool('log_session', 'Save a summary of this conversation to 
     project: S('Optional project, course or area it belongs to'), kind: S('work or study', { enum: ['work', 'study'] }), source: S('Which AI/app this is, e.g. chatgpt, claude'),
   }, ['transcript']);
 
-const toMcp = (t) => ({ name: t.name, description: t.description, inputSchema: t.parameters });
-const LIST = [...VAULT_TOOLS.map(toMcp), LOG_SESSION, ...TOOLS.filter((t) => REUSED.includes(t.name)).map(toMcp)];
+const toMcp = (t) => ({ name: t.name, description: t.description, inputSchema: { ...t.parameters, properties: { ...t.parameters.properties, session_id: S('Session returned by resume_project or resume_task; reuse throughout this task') } } });
+const LIST = [...VAULT_TOOLS.concat(NOTE_TOOLS).map(toMcp), ...CONTEXT_TOOLS, { ...LOG_SESSION, inputSchema: { ...LOG_SESSION.inputSchema, properties: { ...LOG_SESSION.inputSchema.properties, session_id: S('Current task session') } } }, ...TOOLS.filter((t) => REUSED.includes(t.name)).map(toMcp)];
 
 const instructions = () => [
   `This server is ${cfg.owner || 'the owner'}'s personal context: their notes vault and their ${cfg.app} dashboard (tasks, calendar, habits and more).`,
-  'Call whoami first and use it to tailor answers. Look things up (search_notes, recent_sessions, get_schedule) before asking them something their notes might answer; related_notes follows links from a note to connected projects, courses, sessions and ideas.',
+  'For project work, resume_project or resume_task first; keep the returned session_id on later tool calls. Reuse context already read; use read_note section/offset/max_chars for detail. Save the task handoff at milestones with its expected_revision. Call whoami when personal background matters and use it to tailor answers. Look things up (search_notes, recent_sessions, get_schedule) before asking them something their notes might answer; related_notes follows links from a note to connected projects, courses, sessions and ideas.',
   'At the end of a real work or study session, call log_session so it lands in their notes.',
 ].join(' ');
 
 function mcpTools(env, lib, ctx) {
   return {
     ...vaultTools(env, lib),
+    ...noteTools(env),
+    ...contextTools(env),
     async log_session(a) {
       const transcript = clip(a.transcript, 400_000);
       if (transcript.length < 40) throw new ToolError('Send the conversation or a detailed account of the session.');
@@ -57,7 +61,8 @@ async function callTool(env, lib, ctx, name, args) {
   if (vault[name]) return vault[name](args);
   const tools = makeTools(env, lib, []);
   if (name === 'create_task') await tools.list_projects({}); // each MCP call is fresh; the assistant's tools want projects reviewed first
-  return tools[name](args);
+  const { session_id, ...fields } = args; // Session metadata belongs to the MCP activity log, not domain validation.
+  return tools[name](fields);
 }
 
 const rpc = (id, result) => json({ jsonrpc: '2.0', id, result });
@@ -71,24 +76,37 @@ export async function mcp(req, env, lib, ctx) {
   if (msg.id === undefined || msg.id === null) return new Response(null, { status: 202 }); // notifications and responses
   const p = msg.params || {};
   switch (msg.method) {
-    case 'initialize':
+    case 'initialize': {
+      const sessionId = await newAgentSession(env, p.clientInfo?.name);
       // shortcut: echoes the client's protocol version; this server only uses tools, which every version shares.
-      return rpc(msg.id, {
+      const response = rpc(msg.id, {
         protocolVersion: typeof p.protocolVersion === 'string' ? p.protocolVersion : '2025-06-18',
         capabilities: { tools: {} }, serverInfo: { name: cfg.app, version: '1.0.0' }, instructions: instructions(),
       });
+      response.headers.set('Mcp-Session-Id', sessionId);
+      return response;
+    }
     case 'ping': return rpc(msg.id, {});
     case 'tools/list': return rpc(msg.id, { tools: LIST });
     case 'tools/call': {
       let text, isError = false;
       try {
-        text = JSON.stringify(await callTool(env, lib, ctx, String(p.name || ''), p.arguments && typeof p.arguments === 'object' ? p.arguments : {}));
+        const name = String(p.name || '');
+        const args = p.arguments && typeof p.arguments === 'object' ? { ...p.arguments } : {};
+        args.session_id ||= req.headers.get('Mcp-Session-Id') || undefined;
+        const result = await callTool(env, lib, ctx, name, args);
+        text = JSON.stringify(result);
+        const paths = [result.handoff?.entry_note, result.brief?.entry_note, result.path, result.project_path, result.about_me_path, result.note?.path,
+          ...[result.results, result.notes, result.sessions].filter(Array.isArray).flatMap((items) => items.map((n) => n.path))].filter(Boolean);
+        const write = ['save_handoff', 'save_project_brief', 'log_session', 'create_note'].includes(name);
+        try { await recordActivity(env, result.session_id || args.session_id, write ? 'save_requested' : name, paths, write ? 'queued' : 'completed', result.context_id ? result.context_id + ':' + result.revision : result.id || null); }
+        catch { console.error('Agent activity recording unavailable'); }
       } catch (e) {
         if (!(e instanceof ToolError)) console.error('mcp tool', p.name, e);
         text = e instanceof ToolError ? e.message : 'That failed on the server.';
         isError = true;
       }
-      if (text.length > MAX_RESULT) text = text.slice(0, MAX_RESULT) + '… (truncated)';
+      if (text.length > MAX_RESULT) text = JSON.stringify({ truncated: true, message: 'Result exceeds the context budget. Request fewer results or a smaller note section.' });
       return rpc(msg.id, { content: [{ type: 'text', text }], ...(isError ? { isError } : {}) });
     }
     default: return rpcError(msg.id, -32601, `Method not found: ${msg.method}`);

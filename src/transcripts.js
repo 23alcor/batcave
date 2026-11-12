@@ -6,6 +6,7 @@
 // the bridge (PUT /api/ingest/transcripts/targets) and are kept in the meta table.
 //
 // Ingest routes use the INGEST_TOKEN bearer token; /api/transcripts/* is the signed-in app.
+import { recordActivity } from './agent-graph.js';
 import { cfg } from './config.js';
 import { DEFAULT_MODEL } from './chat.js';
 
@@ -262,6 +263,10 @@ async function markFiled(env, id, b) {
   if (row.status !== 'ready') return bad(`it is ${row.status}, not ready`, 409);
   await env.DB.prepare(`UPDATE transcripts SET status = 'filed', filed_path = ?2, filed_at = ?3 WHERE id = ?1`)
     .bind(id, clip(b?.path, 500) || null, wallNow()).run();
+  try {
+    const event = await env.DB.prepare("SELECT session_id FROM agent_events WHERE ref=?1 AND action='save_requested' ORDER BY id DESC LIMIT 1").bind(id).first();
+    await recordActivity(env, event?.session_id, 'file_saved', [clip(b?.path, 500)].filter(Boolean), 'completed', id);
+  } catch { console.error('Agent filing activity unavailable'); }
   return json({ ok: true });
 }
 // App edits: dismiss / restore (both undoable) and moving a summary to another note before it's filed.
