@@ -25,7 +25,7 @@ password. Name it, rename the assistant, and set your time zone in one config fi
 - **Projects page**: click **Edit** to add or delete projects. Deleting hides the project, keeps its tasks, and supports Undo / Redo.
 - **Daily page**: daily habits, weekly habits (done once each Sunday–Saturday week) and their history.
 - **Recipes page**: medium cards with an **Add recipe** card. Save a name, time, servings, ingredients and instructions; view or edit a recipe, or permanently remove it after confirmation. Alfred can find, read, add, edit and remove recipes from chat.
-- **Wishlist**: add and edit items with up to 10 links and 6 images (large photos are shrunk in the browser to fit, or use image URLs). **Sharing settings** hides invite and code-entry controls until expanded. Invite someone to edit the same wishlist. Joining preserves your private wishlist; **Return to my wishlist** restores it. The host can **Stop sharing** to return everyone to their own list. Wishlist and Eating Out sharing are independent.
+- **Wishlist**: **Add item** opens the item form in a dialog, with optional images and links. Choose from all 10 layouts with **Card style**; your choice is remembered on this browser. Switching styles keeps in-progress edits and does not change the shared list. add and edit items with up to 10 links and 6 images (large photos are shrunk in the browser to fit, or use image URLs). **Sharing settings** hides invite and code-entry controls until expanded. Invite someone to edit the same wishlist. Joining preserves your private wishlist; **Return to my wishlist** restores it. The host can **Stop sharing** to return everyone to their own list. Wishlist and Eating Out sharing are independent.
 - **Eating out page**: click **Add address** in the new-place form to open map search, choose a business, and add it with its address and location. The map stays hidden until requested. When `GOOGLE_MAPS_API_KEY` is configured, cards load the first matched Google business photo with author credits, falling back to Street View at the saved address. Photos are fetched as cards become visible; Google photo references are never stored. **Near me** centers the map using your device location; adding a city to a search also narrows it down. Uses Leaflet, OpenStreetMap tiles, Photon search and NYC Open Data restaurant results without an API key; manual entry remains available. Restaurants you want to try and ones you've been to have cuisine and area. Edit place details or remove a place with its dish history. Log what you ate at each place (with notes and a date), then edit or remove any dish/visit. Alfred can add, edit and remove restaurants and dated dishes using the same shared-list permissions; logging a dish moves the place to **Been**. Status changes and dish logs support Undo / Redo. You have one active Eating Out list; separate simultaneous lists are not supported. Sharing affects only Eating Out. Open **Sharing settings**, then click **Make a share code** and send them the code; once they enter it you both see and edit the same places. **Leave shared list** gives you a fresh empty list and leaves the shared places with the others.
 - **Assistant** (bottom-left, press `/`): "what's overdue?", "move my dentist appointment to Friday at 3",
   "add laundry as a weekly habit". It uses OpenAI with tools over your data; recipe removal is permanent and requires an explicit request.
@@ -107,6 +107,18 @@ npx wrangler secret put OPENAI_API_KEY
 It uses the OpenAI Responses API with about two dozen tools over your data (projects, tasks, calendar, habits, wake-up times,
 wishlist, garage). Conversation history stays in your browser tab. Its personality is a dry-witted English
 butler; the name and how it addresses you come from your settings.
+
+## Budget
+
+Budget lives in the existing sidebar. Set category limits for the current month or week, review manual/CSV expenses, and track monthly or annual subscriptions on a renewal calendar. The dashboard totals confirmed personal spending; scheduled subscriptions and transactions awaiting review are excluded. Weekly and monthly limits are linked using 52 weeks per year (about 4.33 weeks per month): monthly × 12 / 52 gives weekly, and weekly × 52 / 12 gives monthly, rounded to cents. The most recently saved applicable limit sets both views; when both cadences already have saved limits, the most recent edit of their latest effective records wins. Limits carry forward until you change them in a later period, preserving earlier budgets.
+
+Outings keep the card charge separate from your own share. Record each friend’s repayment or forgive an amount; forgiveness becomes personal spending in the original outing period. Repayments never count as income. Subscriptions count only when you record their actual charge, with one tracked charge per billing cycle.
+
+CSV headers are `date,name,amount` with optional `category,id`. Dates are YYYY-MM-DD; expenses use positive dollar amounts. Up to 500 rows / 250 KB are accepted. Imports go to Needs review; reimporting the same file skips saved rows. Use stable unique IDs across different statements. Credits/refunds and live bank sync are not implemented; bank linking needs a provider account first.
+
+Alfred has `get_budget` and `propose_budget_change` in chat and MCP. His writes only prepare **one-record proposals**. Review the exact before/after in Budget → Alfred proposals and approve each yourself. Proposals expire after 24 hours and stale versions are rejected. Archived records live only in Budget → Archive, where you can restore them or confirm permanent deletion of one record. Permanent deletion requires an archived, current-version record with no remaining record or pending-proposal references; it removes the record and its proposals, retains change history for audit, and cannot be undone. Alfred cannot permanently delete records; bulk reset is unavailable. Other edits retain audited, version-checked undo. Category archives are blocked while active records use them. History shows the latest 100 changes; JSON export contains current records plus that displayed history. These safeguards cover budget tools; they do not change Alfred’s existing permissions for other app sections.
+
+Apply migration `0017_budget.sql` through the usual migration command before deploying. It creates budget tables and category names, without importing Notion data or inserting sample expenses. Invited users receive the same schema in their private database automatically.
 
 ## Alfred command API
 
@@ -192,8 +204,8 @@ other AI apps can look you up instead of you re-explaining yourself. It runs as 
   the current time), `search_notes`, `read_note`, `list_notes`, `recent_sessions`, and `related_notes`, which
   follows `[[links]]` both ways (what a note links to, and every note that links to it).
 - **Your dashboard**: overview, tasks, schedule, free time, projects, habits, wishlist, garage, recipes, places to
-  eat. The only writes are `create_task` and `log_session` (sends the conversation to Sessions, above). Nothing
-  can be edited or deleted through it.
+  eat. Dashboard writes are `create_task` and `log_session` (sends the conversation to Sessions, above). Managed
+  project briefs and task handoffs can also be updated through the context tools below; original notes cannot be edited or deleted.
 
 Connect it two ways:
 
@@ -218,8 +230,53 @@ bridge: each friend's vault lives in their own database and is built entirely fr
 Alfred "what do you know about me?" to see it, or "forget …" to remove a fact. The MCP server stays owner-only.
 
 Put a note titled **About Me** in the vault (who you are, what you're working on, how you like answers): `whoami`
-returns it, and the server tells every AI to call `whoami` first. Whatever is in the vault copy is readable by the
+returns up to 4,000 characters of it. For project work the server tells AI clients to resume the relevant project or task first; personal background is fetched only when needed. Whatever is in the vault copy is readable by the
 apps you connect, so leave out what you wouldn't tell them.
+
+### Project bookmarks, task handoffs, and Agent Graph
+
+For continuing work, call `resume_project` or `resume_task` with an existing note's title/path. Each task gets its
+own `session_id`; reuse it on subsequent MCP calls. A connector's `Mcp-Session-Id` header supplies a fallback
+identity, but resuming a different task returns a separate session so simultaneous chats do not share one trail.
+
+- `resume_project`: short shared brief and up to 10 task starting points.
+- `resume_task`: one task bookmark/handoff and its revision. Supply `since_revision` to get an unchanged response without repeating its content.
+- `save_project_brief`: bounded shared brief (1,500 characters) and `entry_note` bookmark.
+- `save_handoff`: bounded task handoff (3,000 characters), next action (500), and bookmark. `entry_note` may include `#Heading`.
+- Both saves require `expected_revision` (0 creates, later saves must match the last revision read) and a session identity. A stale save is rejected so the client can resume and merge.
+
+`read_note` returns up to 4,000 characters by default (maximum 12,000), with `section`, `offset`, `next_offset`,
+and `truncated` fields. Search defaults to five snippets, maximum ten; recent sessions defaults to five,
+maximum ten. Oversized tool results return a valid JSON budget message rather than broken, truncated JSON.
+
+The contexts are stored separately from the read-only vault mirror. A bridge retrieves
+`GET /api/ingest/contexts`, writes each context beside the existing project note in an `Agent Context/` folder,
+and acknowledges `POST /api/ingest/contexts/filed` with `{id, revision}` only after the write succeeds.
+These routes require `INGEST_TOKEN`. The supplied bridge accepts only its own `type: agent-context` notes
+with matching identity and content hash, preserves manual edits, checks path containment, rejects symlinks,
+and writes atomically. Run only one context-writing bridge for a synced vault. New project notes remain
+owner-managed; new tasks can be created for any existing typed project/course/area note.
+
+The owner-only live viewer uses:
+
+| Endpoint | Authentication / result |
+| --- | --- |
+| `GET /api/agent-graph` | Owner login or `MCP_TOKEN`; latest 200 activity events and up to 500 bookmark metadata records |
+| `GET /api/agent-graph/stream` | WebSocket; first frame `{type: "authenticate", token: MCP_TOKEN}`; no events before authentication |
+
+The stream requires the `GRAPH_HUB` Durable Object binding and its class migration from `wrangler.example.jsonc`.
+Apply D1 migration `0015_agent_graph.sql` before deploying the updated Worker. These tables are owner-only and
+are intentionally not installed in friends' databases. The WebSocket closes on invalid/expired authentication;
+key rotation stops delivery to already connected viewers. Activity retains the latest 2,000 events, including
+agent, task, note paths, and operation timestamps, with no note bodies or raw tool arguments. `save_requested`
+means queued; `file_saved` is emitted only after the bridge acknowledges. Graph metadata is delivered directly
+to the viewer and does not enter an AI conversation.
+
+The companion Obsidian **Agent Graph** plugin ([source and installation](integrations/obsidian-agent-graph/README.md)) renders the local vault's resolved links and note metadata. It
+shows separate agent markers/trails, bookmark markers, a task/project filter, recent activity, and clickable
+notes. A session's last successful read or confirmed write determines its marker; search results are highlighted
+without pretending that every hit was read. Only MCP calls through this server are instrumented. Local file
+reads, private model reasoning, and Alfred's separate in-app tool loop are not shown.
 
 ## Google Calendar (two-way)
 
@@ -315,6 +372,7 @@ npm run deploy
 ```
 src/worker.js      API routes, login, to-do API, wake-up times, habits
 src/chat.js        The assistant: OpenAI Responses API tool loop
+src/agent-graph.js Owner-only activity stream and managed project/task contexts
 src/mcp.js         MCP server for outside AI apps, its OAuth, and the notes-vault copy
 src/google.js      Google Calendar OAuth + two-way sync
 src/calendar.js    Weekly schedule expansion + iCal parsing
@@ -339,3 +397,28 @@ npx wrangler secret put GOOGLE_MAPS_API_KEY
 ```
 
 The cards enable photos once the secret is available. Local development can use the same variable in `.dev.vars`. Existing calendar OAuth credentials do not enable Maps photos. Provider usage can incur Google Maps Platform charges.
+
+### Create new Obsidian notes
+
+The owner's Alfred chat and MCP offer `create_note(title, folder, content)` and
+`note_status(request_id)`. Creation uses an existing regular vault folder discovered
+through note search. Existing titles/files, system folders, sessions and daily notes
+are protected. Notes are queued until the Mac confirms a successful file write;
+`status: saved` is an acknowledgement, not a promise that a queued request succeeded.
+A failed request reports its error; use a new title to resolve a filename conflict.
+
+Apply owner D1 migration `0016_note_requests.sql` before deploying. Run the companion
+writer on the Mac with the existing bridge credentials in `~/.config/batcave-bridge.env`:
+
+```sh
+python3 scripts/notes-bridge.py --vault '/Users/hasatic/Documents/Bat Vault'
+```
+
+Schedule this command alongside the existing bridge (for example every minute with
+launchd). The original bridge continues mirroring notes on its normal schedule.
+The companion imports its HTTP/config helpers without modifying vault `.tools/` files.
+It writes a complete temporary file and exclusively links it into place, never
+replacing a destination. Exact retries are acknowledged; manual edits are preserved.
+Keep the Mac available for saves. No remote database is inserted into the local vault.
+
+Verification: `python3 scripts/test-notes-bridge.py` and `npm test`.

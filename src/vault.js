@@ -14,15 +14,15 @@ const fn = (name, description, properties = {}, required = []) => ({
 export const VAULT_TOOLS = [
   fn('whoami', 'Who the owner is: their "About Me" note (background, school, work, projects, goals, routine, how they like answers), plus the current date, time and time zone. Use it when the answer depends on who they are or what they are working on.'),
   fn('search_notes', 'Full-text search of their notes vault (projects, courses, areas, session notes, daily notes). Returns paths and matching snippets; read a note with read_note.', {
-    query: S('Words to look for'), folder: S('Optional folder prefix, e.g. "30 Project and Hobby/31 Pet Projects" or "10 Learning and Teaching/11 Academic"'), limit: { type: 'integer', description: 'Max results, default 10, up to 30' },
+    query: S('Words to look for'), folder: S('Optional folder prefix, e.g. "30 Project and Hobby/31 Pet Projects" or "10 Learning and Teaching/11 Academic"'), limit: { type: 'integer', description: 'Max results, default 5, up to 10' },
   }, ['query']),
-  fn('read_note', 'Read one note in full (with its YAML properties). Takes a path from search_notes/list_notes, or a note title.', { path: S('Path like "30 Project and Hobby/31 Pet Projects/Batcave/Batcave.md", or a note title') }, ['path']),
+  fn('read_note', 'Read a bounded part of a note. Prefer a named section; use next_offset to continue. Default 4000 characters, maximum 12000. Takes a path or note title.', { path: S('Note path or title'), section: S('Exact heading text, without #'), offset: { type: 'integer', minimum: 0 }, max_chars: { type: 'integer', minimum: 200, maximum: 12000 } }, ['path']),
   fn('list_notes', 'List notes in their vault, newest first: path, title, tags, last edit.', { folder: S('Optional folder prefix'), limit: { type: 'integer', description: 'Default 50, up to 300' } }),
   fn('related_notes', 'Follow the links of their notes (a knowledge graph): what a note links to, and every note that links to it, with the line around each link. Works for concepts without a note of their own too, e.g. "CUDA". Use it to widen from one note to related projects, courses, sessions and ideas.', {
     note: S('A note title or path, or a concept name'),
   }, ['note']),
   fn('recent_sessions', 'Their recent work and study sessions (session notes): what got done, decisions and next steps. Use for "what have I been working on" or to pick up where a project left off.', {
-    days: { type: 'integer', description: 'How far back, default 7, up to 90' }, project: S('Optional project, course or area name, e.g. "Batcave" or "EECE 448"'),
+    limit: { type: 'integer', minimum: 1, maximum: 10, description: 'Default 5 sessions' }, days: { type: 'integer', description: 'How far back, default 7, up to 90' }, project: S('Optional project, course or area name, e.g. "Batcave" or "EECE 448"'),
   }),
 ];
 
@@ -47,6 +47,23 @@ const linkPatterns = (title) => {
   return [']]', '|', '#'].flatMap((end) => [`%[[${t}${end}%`, `%[[%/${t}${end}%`]);
 };
 
+export function noteSection(body, heading) {
+  if (typeof heading !== 'string' || heading.length > 200) throw new ToolError('section must be a heading of at most 200 characters.');
+  const lines = body.split('\n');
+  let fence = null, start = -1, level = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const f = lines[i].match(/^ {0,3}(`{3,}|~{3,})/);
+    if (f) { if (!fence) fence = f[1]; else if (f[1][0] === fence[0] && f[1].length >= fence.length) fence = null; continue; }
+    if (fence) continue;
+    const h = lines[i].match(/^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/);
+    if (!h) continue;
+    if (start >= 0 && h[1].length <= level) return lines.slice(start, i).join('\n').trimEnd();
+    if (start < 0 && h[2] === heading.trim()) { start = i; level = h[1].length; }
+  }
+  if (start >= 0) return lines.slice(start).join('\n');
+  throw new ToolError('Section not found. Read the beginning of the note to find its heading.');
+}
+
 export function vaultTools(env, lib) {
   const db = env.DB;
   const note = async (p) => {
@@ -56,12 +73,14 @@ export function vaultTools(env, lib) {
   };
   return {
     async whoami() {
-      const about = await db.prepare("SELECT body, updated_at FROM vault_notes WHERE lower(title) = 'about me' ORDER BY length(path) LIMIT 1").first();
+      const about = await db.prepare("SELECT path, body, updated_at FROM vault_notes WHERE lower(title) = 'about me' ORDER BY length(path) LIMIT 1").first();
       const n = await db.prepare('SELECT COUNT(*) AS n FROM vault_notes').first('n');
       const queued = env.UID ? [] : await queue(db);
       return {
         name: cfg.ownerFull || cfg.owner || null, now: lib.localNow(), time_zone: cfg.tz, notes_in_vault: n,
-        about_me: about?.body || 'No "About Me" note yet. Use search_notes and recent_sessions to learn about them.',
+        about_me_path: about?.path || null,
+        about_me_truncated: (about?.body.length || 0) > 4000,
+        about_me: about?.body.slice(0, 4000) || 'No "About Me" note yet. Use search_notes and recent_sessions to learn about them.',
         ...(queued.length ? { just_remembered: queued.map((m) => m.fact) } : {}),
       };
     },
@@ -69,7 +88,7 @@ export function vaultTools(env, lib) {
       // shortcut: a LIKE scan, fine for a few thousand notes; move to FTS5 (D1 has it) if the vault grows past that.
       const ws = words(a.query);
       if (!ws.length) throw new ToolError('query needs at least one word');
-      const limit = Math.min(Math.max(+a.limit || 10, 1), 30);
+      const limit = Math.min(Math.max(+a.limit || 5, 1), 10);
       const args = [], where = [];
       for (const w of ws) { args.push(like(w)); where.push(`(lower(title) LIKE ?${args.length} ESCAPE '\\' OR lower(tags) LIKE ?${args.length} ESCAPE '\\' OR lower(body) LIKE ?${args.length} ESCAPE '\\')`); }
       if (a.folder) { args.push(clip(a.folder, 200).replace(/\/+$/, '') + '/%'); where.push(`path LIKE ?${args.length}`); }
@@ -79,9 +98,17 @@ export function vaultTools(env, lib) {
       return { query: a.query, total: results.length, results: results.slice(0, limit).map((n) => ({ path: n.path, title: n.title, tags: n.tags, updated_at: n.updated_at, snippet: snippet(n.body, ws) })) };
     },
     async read_note(a) {
-      const n = await note(a.path);
+      const [path, fragment] = typeof a.path === 'string' ? a.path.split('#', 2) : [];
+      const n = await note(path);
       if (!n) throw new ToolError('No note with that path or title. Use search_notes or list_notes.');
-      return { path: n.path, title: n.title, tags: n.tags, updated_at: n.updated_at, body: n.body };
+      const section = a.section || fragment;
+      const source = section ? noteSection(n.body, section) : n.body;
+      const offset = a.offset ?? 0, max = a.max_chars ?? 4000;
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(max) || max < 200 || max > 12000) throw new ToolError('Use a nonnegative offset and max_chars between 200 and 12000.');
+      let end = Math.min(source.length, offset + max);
+      if (end < source.length && /[\uD800-\uDBFF]/.test(source[end - 1] || '')) end--;
+      const truncated = end < source.length;
+      return { path: n.path, title: n.title, tags: n.tags, updated_at: n.updated_at, section: section || null, body: source.slice(offset, end), offset, next_offset: truncated ? end : null, truncated };
     },
     async list_notes(a) {
       const limit = Math.min(Math.max(+a.limit || 50, 1), 300);
@@ -129,7 +156,7 @@ export function vaultTools(env, lib) {
         args.push(`%/${p}%/Sessions/%`, `%project: "[[${p}%`);
         where += ` AND (path LIKE ?${args.length - 1} OR body LIKE ?${args.length})`;
       }
-      const { results } = await db.prepare(`SELECT path, title, updated_at, body FROM vault_notes WHERE ${where} ORDER BY title DESC LIMIT 40`).bind(...args).all();
+      const { results } = await db.prepare(`SELECT path, title, updated_at, body FROM vault_notes WHERE ${where} ORDER BY title DESC LIMIT ${Math.min(Math.max(Math.floor(+a.limit || 5), 1), 10)}`).bind(...args).all();
       return {
         since, sessions: results.map((n) => ({
           path: n.path, title: n.title, summary: sectionOf(n.body, 'Summary'),

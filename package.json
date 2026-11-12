@@ -15,7 +15,7 @@
     "db:examples": "wrangler d1 execute batcave --remote --file examples/starter.sql",
     "db:examples:local": "wrangler d1 execute batcave --local --file examples/starter.sql",
     "import:notion": "node scripts/import-notion.mjs",
-    "test": "node --import ./scripts/node-shims.mjs --test scripts/test-alfred.mjs scripts/test-weather.mjs scripts/test-places.mjs scripts/test-wishlist.mjs scripts/test-mcp.mjs"
+    "test": "node --import ./scripts/node-shims.mjs --test scripts/test-alfred.mjs scripts/test-weather.mjs scripts/test-places.mjs scripts/test-wishlist.mjs scripts/test-mcp.mjs scripts/test-budget.mjs scripts/test-budget-subscriptions.mjs scripts/test-navigation.mjs"
   },
   "engines": {
     "node": ">=20"

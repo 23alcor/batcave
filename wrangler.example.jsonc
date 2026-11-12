@@ -21,8 +21,8 @@
     }
   ],
   // Each invited friend gets their own small SQLite database (a Durable Object). The owner's data stays in D1.
-  "durable_objects": { "bindings": [{ "name": "USERDB", "class_name": "UserDB" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UserDB"] }],
+  "durable_objects": { "bindings": [{ "name": "USERDB", "class_name": "UserDB" }, { "name": "GRAPH_HUB", "class_name": "AgentGraphHub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UserDB"] }, { "tag": "v2", "new_sqlite_classes": ["AgentGraphHub"] }],
   // Optional: serve it on your own domain (the domain has to be on your Cloudflare account).
   // Without this it lives at https://batcave.<your-subdomain>.workers.dev
   // "routes": [{ "pattern": "cave.example.com", "custom_domain": true }],
