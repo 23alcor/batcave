@@ -26,7 +26,7 @@ function database(files) {
 }
 function setup(t) {
   const files = readdirSync(new URL('../migrations/', import.meta.url)).filter(f => f.endsWith('.sql')).sort();
-  const main = database(files), friend = database(files.filter(f => /^(0001|0003|0004|0005|0006|0007|0009|0012)_/.test(f)));
+  const main = database(files), friend = database(files.filter(f => /^(0001|0003|0004|0005|0006|0007|0009|0012|0018)_/.test(f)));
   t.after(() => { main.sql.close(); friend.sql.close(); });
   main.sql.exec("INSERT INTO users (id, name, email, password_hash) VALUES (1, 'Alex', 'alex@example.com', 'test'), (2, 'Sam', 'sam@example.com', 'test')");
   const USERDB = { idFromName: id => id, get(id) {
@@ -108,4 +108,42 @@ test('a friend can host a wishlist without exposing their other tables; joining 
   await call(0, '/leave', 'POST', {});
   assert.deepEqual((await (await call(0)).json()).items, []);
   assert.equal(friend.sql.prepare('SELECT COUNT(*) AS n FROM wishlist').get().n, 1);
+});
+
+test('contributors are recorded from the signed-in account, preserved on edits, and retained after leaving', async t => {
+  const { main, call } = setup(t);
+  main.sql.exec("INSERT INTO wishlist (id, name) VALUES ('legacy-author', 'Earlier item')");
+  const mine = await (await call(0, '', 'POST', { name: 'Owner item', added_by: 1 })).json();
+  const invite = await (await call(0, '/share', 'POST')).json();
+  assert.equal((await call(1, '/join', 'POST', invite)).status, 200);
+  const theirs = await (await call(1, '', 'POST', { name: 'Alex item', added_by: 0 })).json();
+  assert.equal((await call(1, '/' + mine.id, 'PATCH', { name: 'Edited by Alex', added_by: 1 })).status, 200);
+  assert.equal((await call(0, '/' + theirs.id, 'PATCH', { status: 'Bought', added_by: 0 })).status, 200);
+  const data = await (await call(0)).json();
+  assert.equal(data.viewer_id, 0);
+  assert.deepEqual(data.contributors, [{ id: 0, name: 'Robin' }, { id: 1, name: 'Alex' }]);
+  assert.equal(data.items.find(i => i.id === mine.id).added_by, 0);
+  assert.equal(data.items.find(i => i.id === theirs.id).added_by, 1);
+  assert.equal(data.items.find(i => i.id === 'legacy-author').added_by, null);
+  assert.equal((await (await call(1)).json()).viewer_id, 1);
+  await call(1, '/leave', 'POST');
+  const remaining = await (await call(0)).json();
+  assert.deepEqual(remaining.members, []);
+  assert.ok(remaining.contributors.some(p => p.id === 1 && p.name === 'Alex'));
+  assert.equal(remaining.items.find(i => i.id === theirs.id).added_by, 1);
+  assert.deepEqual((await (await call(1)).json()).items, []);
+});
+
+test('owner and friend attribution works when a friend hosts the shared wishlist', async t => {
+  const { friend, call } = setup(t);
+  const friendItem = await (await call(1, '', 'POST', { name: 'Friend-hosted item' })).json();
+  const invite = await (await call(1, '/share', 'POST')).json();
+  assert.equal((await call(0, '/join', 'POST', invite)).status, 200);
+  const ownerItem = await (await call(0, '', 'POST', { name: 'Owner contribution' })).json();
+  const data = await (await call(1)).json();
+  assert.equal(data.viewer_id, 1);
+  assert.equal(data.items.find(i => i.id === friendItem.id).added_by, 1);
+  assert.equal(data.items.find(i => i.id === ownerItem.id).added_by, 0);
+  assert.equal(friend.sql.prepare('SELECT added_by FROM wishlist WHERE id=?').get(ownerItem.id).added_by, 0);
+  assert.deepEqual(data.contributors, [{ id: 1, name: 'Alex' }, { id: 0, name: 'Robin' }]);
 });

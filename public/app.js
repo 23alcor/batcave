@@ -92,7 +92,7 @@ function when(t) {
 const greeting = (hm) => { const h = +hm.slice(0, 2); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 
 // ---------- shared state ----------
-const state = { dash: null, weekStart: null, wishFilter: 'Searching', eatFilter: 'want' };
+const state = { dash: null, weekStart: null, wishFilter: 'Searching', wishContributor: 'all', eatFilter: 'want' };
 async function refreshDash() {
   state.dash = await api('/api/dashboard');
   const k = state.dash.kpis;
@@ -630,9 +630,25 @@ $('#recipe-remove').onclick = async () => {
 
 function wishMediaFields(item = {}) {
   return `<label>Links (one per line)<textarea class="input" name="links" rows="2" placeholder="https://…">${esc((item.links || []).join('\n'))}</textarea></label>
-    <label>Image URLs (one per line)<textarea class="input" name="image_urls" rows="2" placeholder="https://…">${esc((item.images || []).filter(i => !i.startsWith('data:')).join('\n'))}</textarea></label>
+    <label>Images<textarea class="input" name="image_urls" data-wish-paste rows="2" placeholder="Paste an image or image URLs here…">${esc((item.images || []).filter(i => !i.startsWith('data:')).join('\n'))}</textarea><span class="meta">Paste a copied image with ⌘V / Ctrl+V, or enter image URLs, one per line.</span></label>
+    <div data-wish-pasted class="wish-pasted-images" role="group" aria-label="Pasted images"></div>
+    <p data-wish-paste-status class="meta" role="status" hidden></p>
     ${(item.images || []).filter(i => i.startsWith('data:')).map(i => `<label class="wish-keep"><input type="checkbox" name="keep_image" value="${esc(i)}" checked><img src="${esc(i)}" alt="Saved image" loading="lazy">Keep image</label>`).join('')}
     <label>Add images<input class="input" type="file" name="uploads" accept="image/png,image/jpeg,image/webp,image/gif" multiple><span class="meta">Up to 6 images. Large photos are shrunk to fit.</span></label>`;
+}
+function openWishEditor(item) {
+  const dialog = $('#wish-edit-dialog');
+  dialog.innerHTML = `<form data-form="edit-wish" data-id="${esc(item.id)}">
+    <h2 id="wish-edit-title">Edit wishlist item</h2>
+    <label>Item<input class="input" name="name" value="${esc(item.name)}" maxlength="300" required autofocus></label>
+    <label>Category<input class="input" name="category" value="${esc(item.category || '')}" list="wish-cats" maxlength="60"></label>
+    <label>Price<input class="input" name="price" value="${esc(item.price ?? '')}" type="number" min="0" step="any"></label>
+    <label>Status<select class="input" name="status">${WISH_STATUSES.map(status => `<option${status === item.status ? ' selected' : ''}>${esc(status)}</option>`).join('')}</select></label>
+    <div class="wish-fields">${wishMediaFields(item)}</div>
+    <p data-wish-error role="alert" hidden></p>
+    <div class="form-row"><button class="btn" type="button" data-action="wish-edit-cancel">Cancel</button><button class="btn primary" type="submit">Save changes</button></div>
+  </form>`;
+  dialog.showModal();
 }
 // Uploaded images live in the item's database row (capped by the server), so shrink each one to fit `budget` characters.
 async function shrinkImage(file, budget) {
@@ -651,22 +667,48 @@ async function shrinkImage(file, budget) {
   }
   throw new Error(`${file.name} is too detailed to fit. Use an image URL instead.`);
 }
+document.addEventListener('paste', async event => {
+  const area = event.target.closest('[data-wish-paste]');
+  if (!area) return;
+  const images = [...(event.clipboardData?.files || [])].filter(file => file.type.startsWith('image/') && file.size);
+  if (!images.length) return;
+  event.preventDefault();
+  const form = area.closest('form'), save = $('button[type="submit"]', form), status = $('[data-wish-paste-status]', form);
+  status.hidden = false;
+  if (save.disabled) { status.textContent = 'Please wait for the current image or save to finish, then paste again.'; return; }
+  save.disabled = true; form.dataset.wishPasting = '1'; status.textContent = 'Preparing pasted image…';
+  try {
+    const data = new FormData(form), kept = data.getAll('keep_image'), files = data.getAll('uploads').filter(file => file.size);
+    const urls = area.value.split('\n').map(value => value.trim()).filter(Boolean);
+    if (kept.length + files.length + urls.length + images.length > 6) throw new Error('Use up to 6 images per item. Untick an image before pasting another.');
+    const budget = (650000 - kept.join('').length) / (files.length + images.length);
+    if (budget < 20000) throw new Error('Not enough room for another image. Untick a saved image first.');
+    const pasted = await Promise.all(images.map(file => shrinkImage(file, budget)));
+    $('[data-wish-pasted]', form).insertAdjacentHTML('beforeend', pasted.map(src => `<label class="wish-keep"><input type="checkbox" name="keep_image" value="${esc(src)}" checked><img src="${esc(src)}" alt="Pasted image">Keep pasted image</label>`).join(''));
+    area.value = urls.join('\n');
+    status.textContent = `Pasted ${pasted.length === 1 ? '1 image' : pasted.length + ' images'}. Save the item to keep them.`;
+  } catch (error) { status.textContent = error.message; }
+  finally { delete form.dataset.wishPasting; save.disabled = false; }
+});
 const WISH_STATUSES = ['Searching', 'Waiting for discount', 'Saving money', 'Bought', 'Gave up'];
 const WISH_STYLES = {
   'budget-classic': 'Budget classic', 'image-first': 'Image first', 'compact-horizontal': 'Compact horizontal',
   editorial: 'Editorial', 'split-panel': 'Split panel', 'text-only': 'Text only',
   'photo-showcase': 'Photo showcase', 'price-first': 'Price first', gallery: 'Gallery', 'status-led': 'Status led',
 };
-state.wishStyle = 'budget-classic';
+state.wishStyle = 'image-first';
 try {
   const saved = localStorage.getItem('batcave-wish-style');
   if (Object.hasOwn(WISH_STYLES, saved)) state.wishStyle = saved;
 } catch { /* storage unavailable */ }
 
 async function viewWishlist(view) {
-  const { items, members, own } = await api('/api/wishlist');
+  const { items, members, own, viewer_id, contributors = [] } = await api('/api/wishlist');
+  state.wishItems = items;
   const f = state.wishFilter;
-  const shown = items.filter((i) => f === 'All' || i.status === f);
+  const people = [['all', 'All'], [String(viewer_id), 'Mine'], ...contributors.filter(p => p.id !== viewer_id).map(p => [String(p.id), p.name]), ...(items.some(i => i.added_by == null) ? [['earlier', 'Earlier items']] : [])];
+  if (!people.some(([id]) => id === state.wishContributor)) state.wishContributor = 'all';
+  const shown = items.filter(i => (f === 'All' || i.status === f) && (state.wishContributor === 'all' || (i.added_by == null ? 'earlier' : String(i.added_by)) === state.wishContributor));
   const cats = [...new Set(shown.map((i) => i.category || 'Other'))].sort();
   view.innerHTML = `
     <header class="head sharing-head"><div><h1>Wishlist</h1><div class="sub">${items.filter((i) => !['Bought', 'Gave up'].includes(i.status)).length} things you want · ${members.length ? 'shared with ' + members.map(esc).join(', ') : 'private'}</div></div><div class="actions"><button class="btn primary" type="button" data-action="wish-add" aria-haspopup="dialog" aria-controls="wish-add-dialog">Add item</button></div></header>
@@ -679,21 +721,22 @@ async function viewWishlist(view) {
       <p data-wish-error role="alert" hidden></p>
       <div class="form-row"><button class="btn" type="button" data-action="wish-add-cancel">Cancel</button><button class="btn primary" type="submit">Add item</button></div>
     </form></dialog>
+    <dialog id="wish-edit-dialog" aria-labelledby="wish-edit-title"></dialog>
+    <section class="wish-contributors" aria-label="Filter by who added an item">
+      <h2>Added by</h2><div class="chips" role="group" aria-label="Contributor">${people.map(([id, label]) => `<button class="chip${state.wishContributor === id ? ' on' : ''}" data-action="wish-contributor" data-contributor="${esc(id)}" aria-pressed="${state.wishContributor === id}">${esc(label)}</button>`).join('')}</div>
+      ${state.wishContributor === 'earlier' ? '<p class="muted">These items were saved before contributor tracking. Who added them is unknown.</p>' : ''}
+    </section>
     <div class="wish-toolbar"><div class="chips" role="group" aria-label="Status">${[...WISH_STATUSES, 'All'].map((s) => `<button class="chip${f === s ? ' on' : ''}" data-action="wish-filter" data-filter="${esc(s)}" aria-pressed="${f === s}">${esc(s)}</button>`).join('')}</div>
       <label class="wish-style-label" for="wish-style">Card style<select id="wish-style" class="input" data-action="wish-style">${Object.entries(WISH_STYLES).map(([value, label]) => `<option value="${value}"${state.wishStyle === value ? ' selected' : ''}>${label}</option>`).join('')}</select></label></div>
     <div id="wish-list" data-style="${state.wishStyle}">
       ${cats.map((c, index) => `<section class="wish-category" aria-labelledby="wish-category-${index}"><h2 id="wish-category-${index}">${esc(c)} <span class="muted">(${shown.filter((i) => (i.category || 'Other') === c).length})</span></h2><div class="wish-grid">${shown.filter((i) => (i.category || 'Other') === c).map((i) => `<article class="wish-item" aria-labelledby="wish-title-${esc(i.id)}">
         <div class="wish-title"><span class="wish-category-label">${esc(c)}</span><h3 id="wish-title-${esc(i.id)}">${i.links?.length ? `<a href="${esc(i.links[0])}" target="_blank" rel="noopener noreferrer">${esc(i.name)}</a>` : esc(i.name)}</h3></div>
         ${i.price != null ? `<span class="wish-price">${Number(i.price).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}</span>` : ''}
-        <label class="wish-status"><span class="sr">Status for ${esc(i.name)}</span><select class="input" data-action="wish-status" data-id="${esc(i.id)}" data-prev="${esc(i.status)}">${WISH_STATUSES.map((s) => `<option${s === i.status ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></label>
-        ${i.images?.length ? `<div class="wish-images">${i.images.map(src => `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer"><img src="${esc(src)}" alt="${esc(i.name)}" loading="lazy" referrerpolicy="no-referrer"></a>`).join('')}</div>` : ''}
+        <span class="wish-status">${esc(i.status)}</span>
+        ${i.images?.length ? `<div class="wish-images">${i.images.slice(0, 1).map(src => `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer"><img src="${esc(src)}" alt="${esc(i.name)}" loading="lazy" referrerpolicy="no-referrer"></a>`).join('')}</div>` : ''}
         ${i.notes ? `<p class="wish-notes">${esc(i.notes)}</p>` : ''}
         ${i.links?.length ? `<div class="wish-links">${i.links.map((url, index) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(new URL(url).hostname)}${i.links.length > 1 ? ' · ' + (index + 1) : ''}</a>`).join('')}</div>` : ''}
-        <details class="wish-edit"><summary>Edit item, images and links</summary><form class="wish-fields" data-form="edit-wish" data-id="${esc(i.id)}">
-          <label>Item<input class="input" name="name" value="${esc(i.name)}" maxlength="300" required></label>
-          <label>Category<input class="input" name="category" value="${esc(i.category || '')}" maxlength="60"></label>
-          <label>Price<input class="input" name="price" value="${esc(i.price ?? '')}" type="number" min="0" step="any"></label>
-          ${wishMediaFields(i)}<button class="btn primary">Save</button></form></details></article>`).join('')}</div></section>`).join('') || '<section class="card"><div class="empty">Nothing here.</div></section>'}
+        <div class="wish-actions"><div class="wish-actions-left"><button class="btn small wish-edit" type="button" data-action="wish-edit" data-id="${esc(i.id)}" aria-label="Edit ${esc(i.name)}" aria-haspopup="dialog" aria-controls="wish-edit-dialog">Edit</button><button class="btn small" type="button" data-action="wish-finish" data-status="Gave up" data-id="${esc(i.id)}" aria-label="Nevermind ${esc(i.name)}"${i.status === 'Gave up' ? ' disabled' : ''}>Nevermind</button></div><button class="btn small primary" type="button" data-action="wish-finish" data-status="Bought" data-id="${esc(i.id)}" aria-label="Mark ${esc(i.name)} as bought"${i.status === 'Bought' ? ' disabled' : ''}>Bought</button></div></article>`).join('')}</div></section>`).join('') || '<section class="card"><div class="empty">No items match these filters.</div></section>'}
     </div>
     <details class="card sharing-settings"><summary>Sharing settings</summary><h2>${members.length ? 'Shared wishlist' : 'Share this wishlist'}</h2>
       <p>${members.length ? `You and ${members.map(esc).join(', ')} can add and edit everything on this wishlist.` : 'This wishlist is private. Invite someone with a Batcave account to add and edit items together.'}</p>
@@ -873,13 +916,6 @@ document.addEventListener('change', async (ev) => {
       $('#wish-list').dataset.style = el.value;
       try { localStorage.setItem('batcave-wish-style', el.value); } catch { /* storage unavailable */ }
     }
-    if (el.dataset.action === 'wish-status') {
-      const prev = el.dataset.prev, next = el.value;
-      const set = (status) => api('/api/wishlist/' + id, { method: 'PATCH', body: { status } });
-      await set(next);
-      el.dataset.prev = next;
-      remember(`Status: ${next}`, () => set(prev), () => set(next));
-    }
     if (el.dataset.action === 'place-status') {
       const prev = el.dataset.prev, next = el.value;
       const set = (status) => api('/api/eating/' + id, { method: 'PATCH', body: { status } });
@@ -974,8 +1010,33 @@ document.addEventListener('click', async (ev) => {
       remember('Moved to Deadlines', () => set('inbox'), () => set('task'));
       rerender();
     }
+    if (a === 'wish-finish') {
+      if (el.disabled) return;
+      const item = state.wishItems?.find(item => item.id === el.dataset.id);
+      if (!item) return;
+      const next = el.dataset.status, prev = item.status;
+      const buttons = $$('button', el.closest('.wish-actions'));
+      const disabled = buttons.map(button => button.disabled);
+      buttons.forEach(button => { button.disabled = true; });
+      try {
+        const set = status => api('/api/wishlist/' + item.id, { method: 'PATCH', body: { status } });
+        await set(next);
+        remember(next === 'Bought' ? 'Marked as bought' : 'Marked as nevermind', () => set(prev), () => set(next));
+        await render();
+        ($$('[data-action="wish-edit"]').find(button => button.dataset.id === item.id) || $('[data-action="wish-filter"].on'))?.focus();
+      } finally { buttons.forEach((button, index) => { button.disabled = disabled[index]; }); }
+    }
+    if (a === 'wish-edit') {
+      const item = state.wishItems?.find(item => item.id === el.dataset.id);
+      if (item) openWishEditor(item);
+    }
+    if (a === 'wish-edit-cancel') $('#wish-edit-dialog').close();
     if (a === 'wish-add') $('#wish-add-dialog').showModal();
     if (a === 'wish-add-cancel') $('#wish-add-dialog').close();
+    if (a === 'wish-contributor') {
+      state.wishContributor = el.dataset.contributor; await render();
+      $$('[data-action="wish-contributor"]').find(button => button.dataset.contributor === state.wishContributor)?.focus();
+    }
     if (a === 'wish-filter') { state.wishFilter = el.dataset.filter; render(); }
     if (a === 'eat-share' || a === 'wish-share') {
       const { code } = await api(a === 'eat-share' ? '/api/eating/share' : '/api/wishlist/share', { method: 'POST' });
@@ -1072,6 +1133,7 @@ document.addEventListener('submit', async (ev) => {
       return render();
     }
     if (['add-wish', 'edit-wish'].includes(form.dataset.form)) {
+      if (form.dataset.wishPasting) return;
       const button = $('button:not([type]), button[type="submit"]', form); button.disabled = true;
       try {
         const lines = value => (value || '').split('\n').map(s => s.trim()).filter(Boolean);
@@ -1082,11 +1144,14 @@ document.addEventListener('submit', async (ev) => {
         const uploads = await Promise.all(files.map(file => shrinkImage(file, budget)));
         const payload = { name: f.name, category: f.category, price: f.price, links: lines(f.links), images: [...kept, ...lines(f.image_urls), ...uploads] };
         const edit = form.dataset.form === 'edit-wish';
+        if (edit) payload.status = f.status;
         await api('/api/wishlist' + (edit ? '/' + form.dataset.id : ''), { method: edit ? 'PATCH' : 'POST', body: payload });
-        if (!edit) { $('#wish-add-dialog').close(); state.wishFilter = 'Searching'; }
-        toast(edit ? 'Saved' : 'Added'); return render();
+        if (edit) $('#wish-edit-dialog').close();
+        else { $('#wish-add-dialog').close(); state.wishFilter = 'Searching'; state.wishContributor = 'all'; }
+        toast(edit ? 'Saved' : 'Added'); await render();
+        if (edit) $$('[data-action="wish-edit"]').find(button => button.dataset.id === form.dataset.id)?.focus();
+        return;
       } catch (error) {
-        if (form.dataset.form === 'edit-wish') throw error;
         const message = $('[data-wish-error]', form); message.textContent = error.message; message.hidden = false;
       } finally { button.disabled = false; }
     }

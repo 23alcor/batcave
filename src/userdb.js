@@ -12,10 +12,11 @@ import m9 from '../migrations/0009_eating_out.sql';
 import m12 from '../migrations/0012_wishlist_media.sql';
 import m14 from '../migrations/0014_vault_notes.sql';
 import m17 from '../migrations/0017_budget.sql';
+import m18 from '../migrations/0018_wishlist_added_by.sql';
 
 // Per-user schema, applied in order. A new migration that changes per-user tables goes here too (append only).
 // 0002 (login lockout) and 0008 (accounts) are install-wide and stay in D1.
-const MIGRATIONS = [m1, m3, m4, m5, m6, m7, m9, m12, m14, m17];
+const MIGRATIONS = [m1, m3, m4, m5, m6, m7, m9, m12, m14, m17, m18];
 
 export class UserDB extends DurableObject {
   constructor(ctx, env) {
