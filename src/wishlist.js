@@ -15,7 +15,7 @@ export async function wishlist(req, env, path, method, today) {
   let b = {};
   if (method !== 'GET' && !['/api/wishlist/share', '/api/wishlist/leave'].includes(path)) { try { b = await req.json(); } catch { return bad('Invalid JSON'); } }
   if (!b || typeof b !== 'object' || Array.isArray(b)) return bad('Invalid item');
-  const central = env.D1 || env.DB, uid = env.UID;
+  const central = env.D1 || env.DB, uid = env.UID ?? 0;
   const host = uid === 'demo' ? uid : (await central.prepare('SELECT host FROM wish_members WHERE uid = ?1').bind(uid).first('host')) ?? uid;
   if (path === '/api/wishlist/share' && method === 'POST') {
     const code = crypto.randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase();
@@ -49,9 +49,16 @@ export async function wishlist(req, env, path, method, today) {
   if (path === '/api/wishlist' && method === 'GET') {
     const { results } = await db.prepare('SELECT * FROM wishlist ORDER BY created_at DESC').all();
     const { results: people } = uid === 'demo' ? { results: [] } : await central.prepare('SELECT uid FROM wish_members WHERE host = ?1').bind(host).all();
-    const ids = [...new Set([host, ...people.map(p => p.uid)])].filter(id => id !== uid && id !== 'demo');
-    const { results: names } = ids.length ? await central.prepare(`SELECT id, name FROM users WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all() : { results: [] };
-    return json({ items: results.map(i => ({ ...i, links: [...new Set([i.link, ...JSON.parse(i.links || '[]')].filter(webURL))], images: JSON.parse(i.images || '[]') })), members: ids.map(id => id === 0 ? env.OWNER_NAME || 'Owner' : names.find(n => n.id === id)?.name || 'Someone'), own: host === uid });
+    const memberIds = [...new Set([host, ...people.map(p => p.uid)])];
+    const contributorIds = [...new Set([uid, ...memberIds, ...results.map(i => i.added_by).filter(id => id != null)])];
+    const userIds = contributorIds.filter(id => id !== 0 && id !== 'demo');
+    const { results: names } = userIds.length ? await central.prepare(`SELECT id, name FROM users WHERE id IN (${userIds.map(() => '?').join(',')})`).bind(...userIds).all() : { results: [] };
+    const name = id => id === 0 ? env.OWNER_NAME || 'Owner' : id === 'demo' ? 'Preview' : names.find(n => n.id === id)?.name || 'Someone';
+    return json({
+      items: results.map(i => ({ ...i, links: [...new Set([i.link, ...JSON.parse(i.links || '[]')].filter(webURL))], images: JSON.parse(i.images || '[]') })),
+      members: memberIds.filter(id => id !== uid && id !== 'demo').map(name), own: host === uid,
+      viewer_id: uid, contributors: contributorIds.map(id => ({ id, name: name(id) })),
+    });
   }
   const match = path.match(/^\/api\/wishlist\/([\w-]+)$/);
   if (!(path === '/api/wishlist' && method === 'POST') && !(match && method === 'PATCH')) return bad('not found', 404);
@@ -82,6 +89,7 @@ export async function wishlist(req, env, path, method, today) {
   if (method === 'POST') {
     if (!b.name?.trim()) return bad('name is required');
     const id = crypto.randomUUID().replace(/-/g, '');
+    sets.push(`added_by = ?${values.push(uid)}`);
     const columns = sets.map(s => s.split(' = ')[0]);
     await db.prepare(`INSERT INTO wishlist (id, ${columns.join(', ')}) VALUES (?1, ${values.map((_, i) => '?' + (i + 2)).join(', ')})`).bind(id, ...values).run();
     return json({ id }, 201);
